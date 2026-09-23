@@ -1,0 +1,16 @@
+# Python
+backend/venv/
+backend/__pycache__/
+*.pyc
+*.pyo
+.env
+
+# WhatsApp backups and keys (DO NOT COMMIT)
+backend/backups/
+*.crypt15
+*.key
+msgstore.db
+
+# OS Files
+.DS_Store
+Thumbs.db
