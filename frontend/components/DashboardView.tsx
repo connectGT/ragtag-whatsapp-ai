@@ -6,55 +6,14 @@ import { ContextModal } from "./ContextModal";
 import { ListCheck, Clock, CheckCircle2, Search } from "lucide-react";
 
 export const DashboardView: React.FC = () => {
-  const [tasks, setTasks] = useState<TaskCardProps[]>([
-    {
-      id: "task-1",
-      task_name: "Finish Next.js UI mockups",
-      due_date: "Sep 24, 2026 at 23:59",
-      priority: "High",
-      status: "Pending",
-      context_message: {
-        id: "msg_cb0ad8d1",
-        sender_name: "Guru Tiwari",
-        sender_id: "contact_guru",
-        chat_name: "RAGTAG Project Group",
-        content: "Eshanya, please finish the Next.js UI mockups by tomorrow night.",
-        timestamp: "Sep 23, 2026 09:15",
-      },
-    },
-    {
-      id: "task-2",
-      task_name: "Submit SDMS portal files",
-      due_date: "Sep 26, 2026 at 17:00",
-      priority: "High",
-      status: "Pending",
-      context_message: {
-        id: "msg_78f102a9",
-        sender_name: "Prof. H. Sharma",
-        sender_id: "contact_prof_sharma",
-        chat_name: "CS-401 Project Chat",
-        content:
-          "Reminder to all teams: Submit the SDMS portal files by Friday end of day without fail.",
-        timestamp: "Sep 22, 2026 14:30",
-      },
-    },
-    {
-      id: "task-3",
-      task_name: "Review ChromaDB vector chunking parameters",
-      due_date: "Sep 23, 2026 at 21:00",
-      priority: "Medium",
-      status: "Pending",
-      context_message: {
-        id: "msg_a32b918f",
-        sender_name: "Eshanya Bhaiji",
-        sender_id: "contact_eshanya",
-        chat_name: "RAGTAG Core Devs",
-        content:
-          "Can someone review the LangChain text chunk size for ChromaDB indexing tonight?",
-        timestamp: "Sep 23, 2026 08:45",
-      },
-    },
-  ]);
+  const [tasks, setTasks] = useState<TaskCardProps[]>([]);
+
+  React.useEffect(() => {
+    fetch("http://127.0.0.1:5000/api/tasks")
+      .then(res => res.json())
+      .then(data => setTasks(data))
+      .catch(err => console.error("Failed to fetch tasks:", err));
+  }, []);
 
   const [activeTab, setActiveTab] = useState<"All" | "Pending" | "Approved" | "Dismissed">("All");
   const [searchQuery, setSearchQuery] = useState("");
@@ -177,3 +136,4 @@ export const DashboardView: React.FC = () => {
     </div>
   );
 };
+

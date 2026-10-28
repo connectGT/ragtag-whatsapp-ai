@@ -2,6 +2,7 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 import os
 import subprocess
+from database import SessionLocal, Task, Message, Contact
 
 app = Flask(__name__)
 CORS(app) # Enable CORS for Next.js frontend
@@ -15,7 +16,6 @@ os.makedirs(BACKUP_DIR, exist_ok=True)
 
 @app.route('/api/status', methods=['GET'])
 def check_status():
-    """Endpoint to check if the .crypt15 file and key are present."""
     crypt_file = os.path.join(BACKUP_DIR, "msgstore.db.crypt15")
     key_file = os.path.join(BACKUP_DIR, "encrypted_backup.key")
     db_file = os.path.join(WORKSPACE_DIR, "msgstore.db")
@@ -30,26 +30,46 @@ def check_status():
 
 @app.route('/api/decrypt', methods=['POST'])
 def trigger_decryption():
-    """Endpoint to trigger the Phase 1 decryption script."""
     print("[API] Decryption triggered by frontend...")
-    
-    # We call the decrypt_pipeline.py script
     try:
         result = subprocess.run(
             ["python", "decrypt_pipeline.py"], 
             capture_output=True, text=True, check=True
         )
-        return jsonify({
-            "status": "success", 
-            "message": "Phase 1 Decryption complete.",
-            "logs": result.stdout
-        })
+        return jsonify({"status": "success", "message": "Phase 1 Decryption complete.", "logs": result.stdout})
     except subprocess.CalledProcessError as e:
-        return jsonify({
-            "status": "error", 
-            "message": "Decryption failed. Check key validity.",
-            "error_logs": e.stderr
-        }), 500
+        return jsonify({"status": "error", "message": "Decryption failed. Check key validity.", "error_logs": e.stderr}), 500
+
+@app.route('/api/tasks', methods=['GET'])
+def get_tasks():
+    session = SessionLocal()
+    try:
+        tasks = session.query(Task).all()
+        result = []
+        for t in tasks:
+            task_dict = {
+                "id": str(t.id),
+                "task_name": t.task_name,
+                "due_date": t.due_date.strftime("%b %d, %Y at %H:%M") if t.due_date else None,
+                "priority": t.priority,
+                "status": t.status,
+                "context_message": None
+            }
+            if t.context_message:
+                msg = t.context_message
+                sender = session.query(Contact).filter(Contact.id == msg.sender_id).first()
+                task_dict["context_message"] = {
+                    "id": msg.id,
+                    "sender_name": sender.name if sender else "Unknown",
+                    "sender_id": msg.sender_id,
+                    "chat_name": msg.chat_name,
+                    "content": msg.content,
+                    "timestamp": msg.timestamp.strftime("%b %d, %Y %H:%M") if msg.timestamp else None
+                }
+            result.append(task_dict)
+        return jsonify(result)
+    finally:
+        session.close()
 
 if __name__ == '__main__':
     print(f"Starting RAGTAG Backend API... Watching folder: {BACKUP_DIR}")
