@@ -1,6 +1,13 @@
 """
 database.py - Relational Database Layer for RAGTAG
 SQLite Schema definition using SQLAlchemy ORM.
+
+Tables:
+  - contacts  : Ground-truth registry of WhatsApp contacts.
+  - messages  : Raw WhatsApp chat messages (immutable analytical ground truth).
+  - tasks     : AI-extracted action items, each REQUIRED to reference a source
+                message via context_message_id (non-nullable FK) to prevent
+                hallucinations with no traceable origin.
 """
 
 from datetime import datetime
@@ -24,11 +31,19 @@ class Contact(Base):
     """
     Contact Model
     Represents users/senders in WhatsApp chats.
+
+    Note: `id` uses the WhatsApp JID format (e.g. '919XXXXXXXXX@s.whatsapp.net')
+    which already encodes the phone number. `phone_number` stores it in a
+    human-readable E.164 format (e.g. '+919XXXXXXXXX') and is derived at
+    ingest time from the JID for easy querying.
     """
     __tablename__ = "contacts"
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
+    phone_number: Mapped[Optional[str]] = mapped_column(
+        String, unique=True, nullable=True
+    )
 
     # Relationships
     messages: Mapped[list["Message"]] = relationship(
@@ -36,7 +51,7 @@ class Contact(Base):
     )
 
     def __repr__(self) -> str:
-        return f"<Contact(id='{self.id}', name='{self.name}')>"
+        return f"<Contact(id='{self.id}', name='{self.name}', phone='{self.phone_number}')>"
 
 
 class Message(Base):
@@ -66,6 +81,11 @@ class Task(Base):
     """
     Task Model (For Dashboard Task View & Context Trace)
     Represents action items extracted from chat messages by local LLM agent.
+
+    IMPORTANT: `context_message_id` is NON-NULLABLE by design.
+    Every task MUST be grounded in a real source message. This is the primary
+    defence against AI hallucinations — no task can exist without a verifiable
+    origin in the messages table.
     """
     __tablename__ = "tasks"
 
@@ -73,13 +93,13 @@ class Task(Base):
     task_name: Mapped[str] = mapped_column(String, nullable=False)
     due_date: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     priority: Mapped[str] = mapped_column(String, default="Medium", nullable=False)
-    status: Mapped[str] = mapped_column(String, default="Pending", nullable=False)
-    context_message_id: Mapped[Optional[str]] = mapped_column(
-        String, ForeignKey("messages.id"), nullable=True
+    status: Mapped[str] = mapped_column(String, default="pending", nullable=False)
+    context_message_id: Mapped[str] = mapped_column(
+        String, ForeignKey("messages.id"), nullable=False
     )
 
     # Relationships
-    context_message: Mapped[Optional["Message"]] = relationship(
+    context_message: Mapped["Message"] = relationship(
         "Message", back_populates="tasks"
     )
 

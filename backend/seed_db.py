@@ -19,11 +19,13 @@ def seed_database():
         # Create Contacts
         guru = Contact(
             id=str(uuid.uuid4()),
-            name="Guru Tiwari"
+            name="Guru Tiwari",
+            phone_number="+919800000001"
         )
         eshanya = Contact(
             id=str(uuid.uuid4()),
-            name="Eshanya Bhaiji"
+            name="Eshanya Bhaiji",
+            phone_number="+919800000002"
         )
 
         session.add(guru)
@@ -50,7 +52,7 @@ def seed_database():
             task_name="Finish Next.js UI mockups",
             due_date=tomorrow,
             priority="High",
-            status="Pending",
+            status="pending",
             context_message_id=message.id
         )
 
