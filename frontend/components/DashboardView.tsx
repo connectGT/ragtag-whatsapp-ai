@@ -20,12 +20,24 @@ export const DashboardView: React.FC = () => {
   const [selectedContextMsg, setSelectedContextMsg] = useState<ContextMessage | null>(null);
 
   const handleApprove = (id: string) => {
+    fetch("http://127.0.0.1:5000/api/tasks/" + id, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "Approved" }),
+    }).catch(err => console.error("Failed to update task status:", err));
+
     setTasks((prev) =>
       prev.map((t) => (t.id === id ? { ...t, status: "Approved" } : t))
     );
   };
 
   const handleDismiss = (id: string) => {
+    fetch("http://127.0.0.1:5000/api/tasks/" + id, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "Dismissed" }),
+    }).catch(err => console.error("Failed to update task status:", err));
+
     setTasks((prev) =>
       prev.map((t) => (t.id === id ? { ...t, status: "Dismissed" } : t))
     );

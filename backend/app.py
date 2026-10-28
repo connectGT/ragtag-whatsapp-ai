@@ -52,7 +52,7 @@ def get_tasks():
                 "task_name": t.task_name,
                 "due_date": t.due_date.strftime("%b %d, %Y at %H:%M") if t.due_date else None,
                 "priority": t.priority,
-                "status": t.status,
+                "status": t.status.capitalize() if t.status else "Pending",
                 "context_message": None
             }
             if t.context_message:
@@ -68,6 +68,29 @@ def get_tasks():
                 }
             result.append(task_dict)
         return jsonify(result)
+    finally:
+        session.close()
+
+@app.route('/api/tasks/<int:task_id>', methods=['PATCH'])
+def update_task(task_id):
+    data = request.get_json() or {}
+    new_status = data.get("status")
+    
+    session = SessionLocal()
+    try:
+        task = session.query(Task).filter(Task.id == task_id).first()
+        if not task:
+            return jsonify({"error": "Task not found"}), 404
+        
+        if new_status:
+            task.status = new_status.lower()
+            session.commit()
+            return jsonify({"status": "success", "task_id": task_id, "new_status": task.status})
+        
+        return jsonify({"error": "No update fields provided"}), 400
+    except Exception as e:
+        session.rollback()
+        return jsonify({"error": str(e)}), 500
     finally:
         session.close()
 
