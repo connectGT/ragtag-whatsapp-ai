@@ -55,7 +55,7 @@ export const ChatInterface: React.FC = () => {
     "Did anyone ask about SDMS portal files?",
   ];
 
-  const handleSend = (textToSend?: string) => {
+  const handleSend = async (textToSend?: string) => {
     const query = textToSend || inputQuery;
     if (!query.trim()) return;
 
@@ -70,24 +70,32 @@ export const ChatInterface: React.FC = () => {
     setInputQuery("");
     setIsTyping(true);
 
-    setTimeout(() => {
+    try {
+      const res = await fetch("http://127.0.0.1:5000/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query }),
+      });
+      const data = await res.json();
       const agentMsg: ChatMessage = {
         id: (Date.now() + 1).toString(),
         sender: "agent",
-        text: `Indexed SQLite truth database and ChromaDB vector embeddings for query: "${query}". Retrieved matching context entry from encrypted storage.`,
+        text: data.text || "No relevant messages found.",
         timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-        sources: [
-          {
-            chat_name: "RAGTAG Project Group",
-            sender_name: "Guru Tiwari",
-            timestamp: "Sep 23, 2026 09:15",
-            snippet: "Eshanya, please finish the Next.js UI mockups by tomorrow night.",
-          },
-        ],
+        sources: data.sources || [],
       };
       setMessages((prev) => [...prev, agentMsg]);
+    } catch (err: any) {
+      const agentMsg: ChatMessage = {
+        id: (Date.now() + 1).toString(),
+        sender: "agent",
+        text: "Failed to connect to local ChromaDB backend: " + err.message,
+        timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      };
+      setMessages((prev) => [...prev, agentMsg]);
+    } finally {
       setIsTyping(false);
-    }, 1000);
+    }
   };
 
   return (

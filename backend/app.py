@@ -4,6 +4,7 @@ import os
 import subprocess
 from database import SessionLocal, Task, Message, Contact
 from ingest import run_ingestion
+from vector_db import search_chats
 
 app = Flask(__name__)
 CORS(app) # Enable CORS for Next.js frontend
@@ -64,6 +65,33 @@ def trigger_ingest():
         return jsonify(result)
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/api/chat', methods=['POST'])
+def chat_query():
+    data = request.get_json(silent=True) or {}
+    query = data.get("query", "").strip()
+    if not query:
+        return jsonify({"error": "No query provided"}), 400
+
+    hits = search_chats(query, n_results=3)
+    if not hits:
+        return jsonify({
+            "text": "I searched the local ChromaDB vector store, but found no relevant messages matching your query.",
+            "sources": []
+        })
+
+    top_hit = hits[0]
+    response_text = (
+        f"Based on local semantic search in ChromaDB, here is the most relevant discussion found:\n\n"
+        f"**{top_hit['sender_name']}** ({top_hit['chat_name']}):\n"
+        f"\"{top_hit['snippet']}\"\n\n"
+        f"Retrieved with {top_hit['similarity']*100:.1f}% confidence from encrypted storage."
+    )
+
+    return jsonify({
+        "text": response_text,
+        "sources": hits
+    })
 
 @app.route('/api/tasks', methods=['GET'])
 def get_tasks():

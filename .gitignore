@@ -11,6 +11,9 @@ backend/backups/
 *.key
 msgstore.db
 
+# Vector Store
+backend/chroma_store/
+
 # OS Files
 .DS_Store
 Thumbs.db
