@@ -5,6 +5,7 @@ import subprocess
 from database import SessionLocal, Task, Message, Contact
 from ingest import run_ingestion
 from vector_db import search_chats
+from summarizer import generate_catchup_briefing
 
 app = Flask(__name__)
 CORS(app) # Enable CORS for Next.js frontend
@@ -146,6 +147,36 @@ def update_task(task_id):
         return jsonify({"error": str(e)}), 500
     finally:
         session.close()
+
+@app.route('/api/chats', methods=['GET'])
+def get_chats():
+    session = SessionLocal()
+    try:
+        from sqlalchemy import func
+        results = (
+            session.query(Message.chat_name, func.count(Message.id))
+            .group_by(Message.chat_name)
+            .all()
+        )
+        chats = [{"chat_name": r[0], "message_count": r[1]} for r in results if r[0]]
+        return jsonify(chats)
+    finally:
+        session.close()
+
+@app.route('/api/catchup', methods=['GET', 'POST'])
+def catchup_briefing():
+    data = {}
+    if request.method == 'POST':
+        data = request.get_json(silent=True) or {}
+    else:
+        data = request.args.to_dict()
+
+    chat_name = data.get("chat_name")
+    limit = int(data.get("limit", 50))
+    user_name = data.get("user_name", "Guru")
+
+    briefing = generate_catchup_briefing(chat_name=chat_name, limit=limit, user_name=user_name)
+    return jsonify(briefing)
 
 if __name__ == '__main__':
     print(f"Starting RAGTAG Backend API... Watching folder: {BACKUP_DIR}")
