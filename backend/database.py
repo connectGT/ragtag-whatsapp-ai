@@ -15,7 +15,9 @@ from typing import Optional
 from sqlalchemy import create_engine, String, Text, DateTime, Integer, ForeignKey
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
-DATABASE_URL = "sqlite:///msgstore_ragtag.db"
+from pathlib import Path
+DB_PATH = Path(__file__).resolve().parent / "msgstore_ragtag.db"
+DATABASE_URL = f"sqlite:///{DB_PATH.as_posix()}"
 
 # Database Engine & Session Setup
 engine = create_engine(DATABASE_URL, echo=False, future=True)

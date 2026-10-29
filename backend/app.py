@@ -3,6 +3,7 @@ from flask_cors import CORS
 import os
 import subprocess
 from database import SessionLocal, Task, Message, Contact
+from ingest import run_ingestion
 
 app = Flask(__name__)
 CORS(app) # Enable CORS for Next.js frontend
@@ -20,11 +21,24 @@ def check_status():
     key_file = os.path.join(BACKUP_DIR, "encrypted_backup.key")
     db_file = os.path.join(WORKSPACE_DIR, "msgstore.db")
     
+    session = SessionLocal()
+    try:
+        contacts_count = session.query(Contact).count()
+        messages_count = session.query(Message).count()
+        tasks_count = session.query(Task).count()
+    except Exception:
+        contacts_count = messages_count = tasks_count = 0
+    finally:
+        session.close()
+
     status = {
         "backup_found": os.path.exists(crypt_file),
         "key_found": os.path.exists(key_file),
         "decrypted_db_ready": os.path.exists(db_file),
-        "backup_directory": BACKUP_DIR
+        "backup_directory": BACKUP_DIR,
+        "contacts_count": contacts_count,
+        "messages_count": messages_count,
+        "tasks_count": tasks_count,
     }
     return jsonify(status)
 
@@ -39,6 +53,17 @@ def trigger_decryption():
         return jsonify({"status": "success", "message": "Phase 1 Decryption complete.", "logs": result.stdout})
     except subprocess.CalledProcessError as e:
         return jsonify({"status": "error", "message": "Decryption failed. Check key validity.", "error_logs": e.stderr}), 500
+
+@app.route('/api/ingest', methods=['POST'])
+def trigger_ingest():
+    print("[API] Ingestion triggered...")
+    data = request.get_json(silent=True) or {}
+    source_path = data.get("source_path")
+    try:
+        result = run_ingestion(source_path=source_path)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/api/tasks', methods=['GET'])
 def get_tasks():
