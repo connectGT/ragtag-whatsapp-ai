@@ -17,3 +17,6 @@ backend/chroma_store/
 # OS Files
 .DS_Store
 Thumbs.db
+
+# Agent Internal State
+.agents/

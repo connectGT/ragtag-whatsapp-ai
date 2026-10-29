@@ -1,0 +1,6 @@
+{
+  "user_name": "Prof. Sharma Evaluator",
+  "inference_mode": "heuristic_only",
+  "ollama_model": "llama3:latest",
+  "ollama_url": "http://127.0.0.1:11434"
+}

@@ -342,6 +342,25 @@ def run_ingestion(source_path: Optional[str] = None, sync_vectors: bool = True) 
         except Exception as err:
             print(f"[Pipeline] Vector sync warning: {err}")
 
+    # ── Automated Task Extraction Hook (Milestone M1) ─────────────────────────
+    tasks_extracted_count = 0
+    try:
+        print("\n[Pipeline] Running automated task extraction on newly ingested messages...")
+        import task_extractor
+        session = SessionLocal()
+        try:
+            extracted_tasks = task_extractor.extract_tasks_from_messages(messages, mode="auto")
+            if extracted_tasks:
+                save_res = task_extractor.save_extracted_tasks(session, extracted_tasks)
+                tasks_extracted_count = save_res.get("new_tasks_created", 0)
+                print(f"[Pipeline] [OK] Auto-extracted {tasks_extracted_count} action items from ingested messages.")
+            else:
+                print("[Pipeline] No action items found in ingested messages.")
+        finally:
+            session.close()
+    except Exception as err:
+        print(f"[Pipeline] ⚠ Task extraction warning (ingestion will not fail): {err}")
+
     return {
         "status": "success",
         "source": target,
@@ -349,6 +368,7 @@ def run_ingestion(source_path: Optional[str] = None, sync_vectors: bool = True) 
         "messages_added": messages_cnt,
         "total_parsed": len(messages),
         "vectors_synced": vector_count,
+        "tasks_extracted": tasks_extracted_count,
     }
 
 

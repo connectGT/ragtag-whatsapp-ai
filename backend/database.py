@@ -12,7 +12,9 @@ Tables:
 
 from datetime import datetime
 from typing import Optional
-from sqlalchemy import create_engine, String, Text, DateTime, Integer, ForeignKey
+from sqlalchemy import create_engine, String, Text, DateTime, Integer, ForeignKey, event, text
+from sqlalchemy.engine import Engine
+import sqlite3
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
 from pathlib import Path
@@ -21,6 +23,17 @@ DATABASE_URL = f"sqlite:///{DB_PATH.as_posix()}"
 
 # Database Engine & Session Setup
 engine = create_engine(DATABASE_URL, echo=False, future=True)
+
+
+@event.listens_for(Engine, "connect")
+def set_sqlite_pragma(dbapi_connection, connection_record):
+    """Enforce foreign key constraints on every SQLite connection."""
+    if isinstance(dbapi_connection, sqlite3.Connection):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys = ON;")
+        cursor.close()
+
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
@@ -96,6 +109,9 @@ class Task(Base):
     due_date: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     priority: Mapped[str] = mapped_column(String, default="Medium", nullable=False)
     status: Mapped[str] = mapped_column(String, default="pending", nullable=False)
+    extraction_mode: Mapped[str] = mapped_column(
+        String, default="heuristic", server_default="heuristic", nullable=False
+    )
     context_message_id: Mapped[str] = mapped_column(
         String, ForeignKey("messages.id"), nullable=False
     )
@@ -108,13 +124,24 @@ class Task(Base):
     def __repr__(self) -> str:
         return (
             f"<Task(id={self.id}, name='{self.task_name}', priority='{self.priority}', "
-            f"status='{self.status}', context_msg_id='{self.context_message_id}')>"
+            f"status='{self.status}', mode='{self.extraction_mode}', context_msg_id='{self.context_message_id}')>"
         )
 
 
 def init_db():
-    """Initializes and creates all tables in msgstore_ragtag.db if they do not exist."""
+    """Initializes and creates all tables in msgstore_ragtag.db if they do not exist,
+    and runs lightweight schema upgrade checks for existing databases."""
     Base.metadata.create_all(bind=engine)
+
+    with engine.begin() as conn:
+        res = conn.execute(text("PRAGMA table_info(tasks)")).fetchall()
+        col_names = [col[1] for col in res]
+        if col_names and "extraction_mode" not in col_names:
+            conn.execute(
+                text("ALTER TABLE tasks ADD COLUMN extraction_mode VARCHAR NOT NULL DEFAULT 'heuristic'")
+            )
+            print("[Database] Schema upgraded: added 'extraction_mode' column to 'tasks' table.")
+
     print("Database tables initialized successfully in 'msgstore_ragtag.db'.")
 
 

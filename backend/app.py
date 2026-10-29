@@ -2,10 +2,24 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 import os
 import subprocess
-from database import SessionLocal, Task, Message, Contact
+import json
+import uuid
+import re
+import socket
+import threading
+import time
+from datetime import datetime
+
+from database import SessionLocal, Task, Message, Contact, DB_PATH
 from ingest import run_ingestion
-from vector_db import search_chats
+from vector_db import search_chats, CHROMA_PATH, COLLECTION_NAME
 from summarizer import generate_catchup_briefing, generate_timeline_summary
+from settings_manager import load_settings, save_settings, DEFAULT_SETTINGS
+
+try:
+    import task_extractor
+except ImportError:
+    task_extractor = None
 
 app = Flask(__name__)
 CORS(app) # Enable CORS for Next.js frontend
@@ -16,6 +30,62 @@ BACKUP_DIR = os.path.join(WORKSPACE_DIR, "backups")
 
 # Ensure the backup directory exists
 os.makedirs(BACKUP_DIR, exist_ok=True)
+
+
+def get_vectors_count() -> int:
+    """Return current count of embedded vectors in ChromaDB ragtag_collection without loading model."""
+    try:
+        import chromadb
+        client = chromadb.PersistentClient(path=str(CHROMA_PATH))
+        collection = client.get_collection(name=COLLECTION_NAME)
+        return int(collection.count())
+    except Exception:
+        return 0
+
+
+_ollama_online_cache = {"timestamp": 0.0, "online": False}
+_ollama_cache_lock = threading.Lock()
+
+
+def get_ollama_online() -> bool:
+    """Check Ollama service liveness with caching and fast socket timeout."""
+    global _ollama_online_cache
+    now = time.time()
+    with _ollama_cache_lock:
+        if now - _ollama_online_cache["timestamp"] < 5.0:
+            return _ollama_online_cache["online"]
+
+    # Check mode
+    try:
+        mode = load_settings().get("inference_mode", "auto")
+        if mode == "heuristic_only":
+            with _ollama_cache_lock:
+                _ollama_online_cache = {"timestamp": now, "online": False}
+            return False
+    except Exception:
+        pass
+
+    # Fast socket check
+    is_online = False
+    try:
+        with socket.create_connection(("127.0.0.1", 11434), timeout=0.03):
+            is_online = True
+    except Exception:
+        is_online = False
+
+    with _ollama_cache_lock:
+        _ollama_online_cache = {"timestamp": now, "online": is_online}
+    return is_online
+
+
+def get_active_model() -> str:
+    """Return active Ollama model name from settings or default."""
+    try:
+        settings = load_settings()
+        return str(settings.get("ollama_model", "llama3:latest"))
+    except Exception:
+        return "llama3:latest"
+
 
 @app.route('/api/status', methods=['GET'])
 def check_status():
@@ -33,14 +103,33 @@ def check_status():
     finally:
         session.close()
 
+    try:
+        database_path = os.path.normpath(str(DB_PATH))
+    except Exception:
+        database_path = os.path.normpath(os.path.join(WORKSPACE_DIR, "msgstore_ragtag.db"))
+
+    try:
+        chroma_path = os.path.normpath(str(CHROMA_PATH))
+    except Exception:
+        chroma_path = os.path.normpath(os.path.join(WORKSPACE_DIR, "chroma_store"))
+
+    settings = load_settings()
+
     status = {
         "backup_found": os.path.exists(crypt_file),
         "key_found": os.path.exists(key_file),
         "decrypted_db_ready": os.path.exists(db_file),
         "backup_directory": BACKUP_DIR,
+        "database_path": database_path,
+        "chroma_path": chroma_path,
+        "ollama_online": get_ollama_online(),
+        "active_model": get_active_model(),
+        "inference_mode": settings.get("inference_mode", "auto"),
+        "user_name": settings.get("user_name", "Guru"),
         "contacts_count": contacts_count,
         "messages_count": messages_count,
         "tasks_count": tasks_count,
+        "vectors_count": get_vectors_count(),
     }
     return jsonify(status)
 
@@ -104,9 +193,12 @@ def get_tasks():
             task_dict = {
                 "id": str(t.id),
                 "task_name": t.task_name,
-                "due_date": t.due_date.strftime("%b %d, %Y at %H:%M") if t.due_date else None,
+                "due_date": t.due_date.strftime("%b %d, %Y at %H:%M") if (t.due_date and isinstance(t.due_date, datetime)) else (str(t.due_date) if t.due_date else None),
+                "due_date_iso": t.due_date.isoformat() if (t.due_date and isinstance(t.due_date, datetime)) else (str(t.due_date) if t.due_date else None),
                 "priority": t.priority,
                 "status": t.status.capitalize() if t.status else "Pending",
+                "extraction_mode": getattr(t, "extraction_mode", "heuristic") or "heuristic",
+                "context_message_id": t.context_message_id,
                 "context_message": None
             }
             if t.context_message:
@@ -118,10 +210,99 @@ def get_tasks():
                     "sender_id": msg.sender_id,
                     "chat_name": msg.chat_name,
                     "content": msg.content,
-                    "timestamp": msg.timestamp.strftime("%b %d, %Y %H:%M") if msg.timestamp else None
+                    "timestamp": msg.timestamp.strftime("%b %d, %Y %H:%M") if (msg.timestamp and isinstance(msg.timestamp, datetime)) else str(msg.timestamp) if msg.timestamp else None
                 }
             result.append(task_dict)
-        return jsonify(result)
+        return jsonify(result), 200
+    finally:
+        session.close()
+
+
+@app.route('/api/tasks/extract', methods=['POST'])
+def extract_tasks_endpoint():
+    """
+    Triggers automated task extraction from chat messages.
+    Supports chat filtering, dual-mode execution (Ollama / heuristics),
+    and on-demand upgrading of heuristic tasks.
+    """
+    if task_extractor is None:
+        return jsonify({
+            "status": "error",
+            "message": "task_extractor module is not available on the backend."
+        }), 500
+
+    data = request.get_json(silent=True) or {}
+    chat_name = data.get("chat_name")
+    force_reprocess = bool(data.get("force_reprocess", False))
+    mode = data.get("mode", "auto")
+    if mode not in ("auto", "ollama", "heuristic"):
+        mode = "auto"
+
+    session = SessionLocal()
+    try:
+        # 1. Query target ground-truth messages from SQLite
+        query = session.query(Message)
+        if chat_name and chat_name.strip():
+            query = query.filter(Message.chat_name == chat_name.strip())
+        messages = query.order_by(Message.timestamp.asc()).all()
+
+        scanned_count = len(messages)
+        messages_data = [
+            {
+                "id": m.id,
+                "sender_name": m.sender.name if m.sender else "Unknown",
+                "chat_name": m.chat_name,
+                "content": m.content,
+                "timestamp": m.timestamp,
+            }
+            for m in messages
+        ]
+
+        # 2. Extract tasks using dual-mode engine
+        extracted = task_extractor.extract_tasks_from_messages(messages_data, mode=mode)
+
+        # 3. Determine actual extraction mode used
+        if extracted:
+            mode_used = extracted[0].get("extraction_mode", "heuristic")
+        elif mode in ("auto", "ollama") and task_extractor.check_ollama_available():
+            mode_used = "ollama"
+        else:
+            mode_used = "heuristic"
+
+        # 4. Save extracted tasks with foreign key validation & deduplication
+        save_res = task_extractor.save_extracted_tasks(session, extracted)
+        new_count = save_res.get("new_tasks_created", 0)
+        saved_tasks = save_res.get("tasks", [])
+
+        # 5. Execute upgrade if force_reprocess or Ollama mode requested
+        upgraded_count = 0
+        upgraded_tasks = []
+        if force_reprocess or mode == "ollama":
+            upg_res = task_extractor.upgrade_heuristic_tasks(session)
+            upgraded_count = upg_res.get("upgraded_count", upg_res.get("tasks_upgraded", 0))
+            upgraded_tasks = upg_res.get("tasks", [])
+
+        # Combine newly created tasks and upgraded tasks (avoiding duplicate objects)
+        saved_ids = {t["id"] for t in saved_tasks}
+        all_tasks = list(saved_tasks) + [
+            t for t in upgraded_tasks if t.get("id") not in saved_ids
+        ]
+
+        return jsonify({
+            "status": "success",
+            "scanned_messages": scanned_count,
+            "new_tasks_created": new_count,
+            "tasks_upgraded": upgraded_count,
+            "extraction_mode_used": mode_used,
+            "tasks": all_tasks
+        }), 200
+
+    except Exception as e:
+        session.rollback()
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
     finally:
         session.close()
 
@@ -163,6 +344,145 @@ def get_chats():
     finally:
         session.close()
 
+@app.route('/api/settings', methods=['GET', 'POST'])
+def handle_settings():
+    """
+    GET: Returns current settings dictionary.
+    POST: Validates and updates persistent settings in backend/settings.json.
+    """
+    if request.method == 'POST':
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({"error": "Invalid or missing JSON payload"}), 400
+        try:
+            updated = save_settings(data)
+            return jsonify(updated), 200
+        except ValueError as ve:
+            return jsonify({"error": str(ve)}), 400
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+    else:
+        settings = load_settings()
+        return jsonify(settings), 200
+
+
+@app.route('/api/simulation/inject', methods=['POST'])
+def inject_simulation_message():
+    """
+    Simulation Message Injection API (Milestone M2 / Faculty Evaluation).
+    Inserts live or synthetic evaluator messages directly into SQLite ground truth
+    (contacts and messages tables), extracts action items into the tasks table
+    with strict foreign key traceability, and updates ChromaDB vector index.
+    """
+    data = request.get_json(silent=True) or {}
+    content = str(data.get("content") or "").strip()
+    if not content:
+        return jsonify({
+            "status": "error",
+            "message": "Message content cannot be empty."
+        }), 400
+
+    sender_name = (data.get("sender_name") or "Faculty Evaluator").strip()
+    chat_name = (data.get("chat_name") or "Faculty Simulation").strip()
+    raw_ts = data.get("timestamp")
+    mode = data.get("mode", "auto")
+    if mode not in ("auto", "ollama", "heuristic"):
+        mode = "auto"
+
+    # 1. Parse timestamp safely (Python 3.10 compatible)
+    msg_time = datetime.now()
+    if raw_ts and isinstance(raw_ts, str) and raw_ts.strip():
+        clean_ts = raw_ts.strip().replace("Z", "")
+        try:
+            msg_time = datetime.fromisoformat(clean_ts)
+            if msg_time.tzinfo is not None:
+                msg_time = msg_time.replace(tzinfo=None)
+        except Exception:
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S"):
+                try:
+                    msg_time = datetime.strptime(clean_ts, fmt)
+                    break
+                except Exception:
+                    pass
+
+    session = SessionLocal()
+    try:
+        # 2. Resolve or create Contact in SQLite contacts table
+        contact = session.query(Contact).filter(Contact.name == sender_name).first()
+        if not contact:
+            sanitized_name = re.sub(r'[^a-z0-9]+', '_', sender_name.lower()).strip('_')
+            base_jid = f"{sanitized_name or 'user'}@s.whatsapp.net"
+            contact_jid = base_jid
+
+            existing_by_jid = session.query(Contact).filter(Contact.id == contact_jid).first()
+            if existing_by_jid:
+                contact_jid = f"{sanitized_name}_{uuid.uuid4().hex[:6]}@s.whatsapp.net"
+
+            contact = Contact(
+                id=contact_jid,
+                name=sender_name,
+                phone_number=None,
+            )
+            session.add(contact)
+            session.flush()
+
+        # 3. Create and commit Message in SQLite messages table
+        msg_id = f"sim_{uuid.uuid4().hex[:12]}"
+        new_message = Message(
+            id=msg_id,
+            sender_id=contact.id,
+            chat_name=chat_name,
+            timestamp=msg_time,
+            content=content.strip(),
+        )
+        session.add(new_message)
+        session.commit()
+
+        # 4. Trigger immediate task extraction and save to tasks table
+        tasks_extracted = []
+        if task_extractor is not None:
+            msg_dict = {
+                "id": new_message.id,
+                "sender_name": contact.name,
+                "chat_name": new_message.chat_name,
+                "content": new_message.content,
+                "timestamp": new_message.timestamp,
+            }
+            extracted = task_extractor.extract_tasks_from_messages([msg_dict], mode=mode)
+            if extracted:
+                save_res = task_extractor.save_extracted_tasks(session, extracted)
+                tasks_extracted = save_res.get("tasks", [])
+
+        # 5. Synchronize new message to ChromaDB vector store
+        try:
+            import vector_db
+            collection = vector_db.init_chroma(reset=False)
+            chunks = vector_db.chunk_messages([new_message])
+            if chunks:
+                vector_db.embed_and_store(collection, chunks)
+        except Exception as chroma_err:
+            print(f"[Simulation] ChromaDB sync warning (non-fatal): {chroma_err}")
+
+        # 6. Return response conforming to contract
+        return jsonify({
+            "status": "success",
+            "message_id": new_message.id,
+            "tasks_extracted": tasks_extracted,
+            "sender_name": contact.name,
+            "chat_name": new_message.chat_name,
+            "timestamp": new_message.timestamp.isoformat(),
+        }), 200
+
+    except Exception as e:
+        session.rollback()
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+    finally:
+        session.close()
+
+
 @app.route('/api/catchup', methods=['GET', 'POST'])
 def catchup_briefing():
     data = {}
@@ -173,10 +493,19 @@ def catchup_briefing():
 
     chat_name = data.get("chat_name")
     limit = int(data.get("limit", 50))
-    user_name = data.get("user_name", "Guru")
+
+    # Priority: explicit non-empty request param > settings.json user_name > default "Guru"
+    settings = load_settings()
+    configured_user = settings.get("user_name", "Guru")
+    req_user = data.get("user_name")
+    if req_user and isinstance(req_user, str) and req_user.strip():
+        user_name = req_user.strip()
+    else:
+        user_name = configured_user
 
     briefing = generate_catchup_briefing(chat_name=chat_name, limit=limit, user_name=user_name)
     return jsonify(briefing)
+
 
 @app.route('/api/summary', methods=['GET', 'POST'])
 def timeline_summary():
@@ -190,7 +519,15 @@ def timeline_summary():
     preset = data.get("preset", "all")
     start_date = data.get("start_date")
     end_date = data.get("end_date")
-    user_name = data.get("user_name", "Guru")
+
+    # Priority: explicit non-empty request param > settings.json user_name > default "Guru"
+    settings = load_settings()
+    configured_user = settings.get("user_name", "Guru")
+    req_user = data.get("user_name")
+    if req_user and isinstance(req_user, str) and req_user.strip():
+        user_name = req_user.strip()
+    else:
+        user_name = configured_user
 
     summary = generate_timeline_summary(
         chat_name=chat_name,
