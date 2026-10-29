@@ -5,7 +5,7 @@ import subprocess
 from database import SessionLocal, Task, Message, Contact
 from ingest import run_ingestion
 from vector_db import search_chats
-from summarizer import generate_catchup_briefing
+from summarizer import generate_catchup_briefing, generate_timeline_summary
 
 app = Flask(__name__)
 CORS(app) # Enable CORS for Next.js frontend
@@ -177,6 +177,29 @@ def catchup_briefing():
 
     briefing = generate_catchup_briefing(chat_name=chat_name, limit=limit, user_name=user_name)
     return jsonify(briefing)
+
+@app.route('/api/summary', methods=['GET', 'POST'])
+def timeline_summary():
+    data = {}
+    if request.method == 'POST':
+        data = request.get_json(silent=True) or {}
+    else:
+        data = request.args.to_dict()
+
+    chat_name = data.get("chat_name")
+    preset = data.get("preset", "all")
+    start_date = data.get("start_date")
+    end_date = data.get("end_date")
+    user_name = data.get("user_name", "Guru")
+
+    summary = generate_timeline_summary(
+        chat_name=chat_name,
+        preset=preset,
+        start_date=start_date,
+        end_date=end_date,
+        user_name=user_name
+    )
+    return jsonify(summary)
 
 if __name__ == '__main__':
     print(f"Starting RAGTAG Backend API... Watching folder: {BACKUP_DIR}")

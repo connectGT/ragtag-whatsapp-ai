@@ -1,7 +1,7 @@
 "use client";
 
-import React, { useState } from "react";
-import { Send, Bot, User, Database, Terminal, Zap } from "lucide-react";
+import React, { useState, useEffect } from "react";
+import { Send, Bot, User, Database, Terminal, Zap, Calendar, Clock, SlidersHorizontal, X } from "lucide-react";
 
 interface ChatMessage {
   id: string;
@@ -14,6 +14,11 @@ interface ChatMessage {
     timestamp: string;
     snippet: string;
   }[];
+}
+
+interface ChatGroup {
+  chat_name: string;
+  message_count: number;
 }
 
 export const ChatInterface: React.FC = () => {
@@ -48,6 +53,21 @@ export const ChatInterface: React.FC = () => {
 
   const [inputQuery, setInputQuery] = useState("");
   const [isTyping, setIsTyping] = useState(false);
+
+  // Time-Window Summary Modal state
+  const [showTimeModal, setShowTimeModal] = useState(false);
+  const [chats, setChats] = useState<ChatGroup[]>([]);
+  const [selectedChat, setSelectedChat] = useState<string>("all");
+  const [selectedPreset, setSelectedPreset] = useState<string>("last_24_hours");
+  const [startDate, setStartDate] = useState<string>("");
+  const [endDate, setEndDate] = useState<string>("");
+
+  useEffect(() => {
+    fetch("http://127.0.0.1:5000/api/chats")
+      .then((res) => res.json())
+      .then((data) => setChats(data))
+      .catch((err) => console.log("Failed to load chat list:", err));
+  }, []);
 
   const sampleQueries = [
     "What tasks are due this Friday?",
@@ -103,7 +123,7 @@ export const ChatInterface: React.FC = () => {
     const userMsg: ChatMessage = {
       id: Date.now().toString(),
       sender: "user",
-      text: "⚡ Emergency Catch-Me-Up: Give me an executive summary of the latest unread group messages before my call.",
+      text: "⚡ Emergency Catch-Me-Up: Give me an executive briefing of recent missed messages.",
       timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
     };
     setMessages((prev) => [...prev, userMsg]);
@@ -111,42 +131,7 @@ export const ChatInterface: React.FC = () => {
     try {
       const res = await fetch("http://127.0.0.1:5000/api/catchup" + (chatName ? `?chat_name=${encodeURIComponent(chatName)}` : ""));
       const data = await res.json();
-
-      let briefingText = "";
-      if (data.briefing_markdown) {
-        briefingText = data.briefing_markdown;
-      } else if (data.tldr) {
-        briefingText = `### ⚡ Emergency Catch-Me-Up Briefing: **${data.chat_name}**\n` +
-          `*Timeline: ${data.timeline} (${data.message_count} messages analyzed)*\n\n` +
-          `**👥 Active Participants:** ${data.participants ? data.participants.join(", ") : "Team"}\n\n` +
-          `**🔥 Executive TL;DR:**\n` +
-          data.tldr.map((t: string) => `• ${t}`).join("\n") + "\n\n";
-
-        if (data.decisions && data.decisions.length > 0) {
-          briefingText += `**📌 Decisions Made:**\n` +
-            data.decisions.map((d: string) => `• ${d}`).join("\n") + "\n\n";
-        }
-
-        if (data.actions && data.actions.length > 0) {
-          briefingText += `**⚠️ Action Items & Deadlines:**\n` +
-            data.actions.map((a: string) => `• ${a}`).join("\n") + "\n\n";
-        }
-
-        if (data.mentions_for_user && data.mentions_for_user.length > 0) {
-          briefingText += `**👤 Directly Mentioning You:**\n` +
-            data.mentions_for_user.map((m: string) => `• ${m}`).join("\n");
-        }
-      } else {
-        briefingText = data.error || "No messages available to summarize.";
-      }
-
-      const agentMsg: ChatMessage = {
-        id: (Date.now() + 1).toString(),
-        sender: "agent",
-        text: briefingText,
-        timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-      };
-      setMessages((prev) => [...prev, agentMsg]);
+      renderSummaryResult(data);
     } catch (err: any) {
       const agentMsg: ChatMessage = {
         id: (Date.now() + 1).toString(),
@@ -160,8 +145,93 @@ export const ChatInterface: React.FC = () => {
     }
   };
 
+  const handleRunTimelineSummary = async () => {
+    setShowTimeModal(false);
+    setIsTyping(true);
+
+    const presetLabels: Record<string, string> = {
+      last_2_hours: "Last 2 Hours",
+      last_24_hours: "Last 24 Hours",
+      last_7_days: "Last 7 Days",
+      all: "All Time",
+      custom: `Custom Range (${startDate || "Start"} to ${endDate || "Now"})`,
+    };
+
+    const targetChat = selectedChat === "all" ? "All Chats" : selectedChat;
+    const userMsg: ChatMessage = {
+      id: Date.now().toString(),
+      sender: "user",
+      text: `📅 Generate Timeline Summary for **${targetChat}** [Duration: ${presetLabels[selectedPreset] || selectedPreset}]`,
+      timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+    };
+    setMessages((prev) => [...prev, userMsg]);
+
+    try {
+      const res = await fetch("http://127.0.0.1:5000/api/summary", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_name: selectedChat === "all" ? null : selectedChat,
+          preset: selectedPreset,
+          start_date: startDate || null,
+          end_date: endDate || null,
+        }),
+      });
+      const data = await res.json();
+      renderSummaryResult(data);
+    } catch (err: any) {
+      const agentMsg: ChatMessage = {
+        id: (Date.now() + 1).toString(),
+        sender: "agent",
+        text: "Failed to generate timeline summary: " + err.message,
+        timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      };
+      setMessages((prev) => [...prev, agentMsg]);
+    } finally {
+      setIsTyping(false);
+    }
+  };
+
+  const renderSummaryResult = (data: any) => {
+    let briefingText = "";
+    if (data.briefing_markdown) {
+      briefingText = data.briefing_markdown;
+    } else if (data.tldr) {
+      briefingText = `### 📊 Timeline Summary: **${data.title || data.chat_name}**\n` +
+        `*Timeline: ${data.timeline} (${data.message_count} messages analyzed)*\n\n` +
+        `**👥 Active Participants:** ${data.participants ? data.participants.join(", ") : "Team"}\n\n` +
+        `**🔥 Executive Overview:**\n` +
+        data.tldr.map((t: string) => `• ${t}`).join("\n") + "\n\n";
+
+      if (data.decisions && data.decisions.length > 0) {
+        briefingText += `**📌 Decisions Made:**\n` +
+          data.decisions.map((d: string) => `• ${d}`).join("\n") + "\n\n";
+      }
+
+      if (data.actions && data.actions.length > 0) {
+        briefingText += `**⚠️ Action Items & Deadlines:**\n` +
+          data.actions.map((a: string) => `• ${a}`).join("\n") + "\n\n";
+      }
+
+      if (data.mentions_for_user && data.mentions_for_user.length > 0) {
+        briefingText += `**👤 Directly Mentioning You:**\n` +
+          data.mentions_for_user.map((m: string) => `• ${m}`).join("\n");
+      }
+    } else {
+      briefingText = data.error || "No messages found in that time window.";
+    }
+
+    const agentMsg: ChatMessage = {
+      id: (Date.now() + 1).toString(),
+      sender: "agent",
+      text: briefingText,
+      timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+    };
+    setMessages((prev) => [...prev, agentMsg]);
+  };
+
   return (
-    <div className="flex flex-col h-[calc(100vh-180px)] max-w-5xl mx-auto bg-white border border-gray-300 shadow-sm overflow-hidden">
+    <div className="flex flex-col h-[calc(100vh-180px)] max-w-5xl mx-auto bg-white border border-gray-300 shadow-sm overflow-hidden relative">
       {/* Top Console Bar */}
       <div className="px-8 py-3.5 bg-gray-900 text-white border-b border-gray-900 flex items-center justify-between flex-wrap gap-3">
         <div className="flex items-center gap-3">
@@ -171,15 +241,21 @@ export const ChatInterface: React.FC = () => {
             <span>Agentic Chatbot Workspace</span>
           </h2>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2.5">
+          <button
+            onClick={() => setShowTimeModal(true)}
+            className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-white text-xs font-bold border border-gray-600 flex items-center gap-1.5 transition-all cursor-pointer active:translate-x-[1px] active:translate-y-[1px]"
+          >
+            <Clock className="w-3.5 h-3.5 text-yellow-400" />
+            <span>Time-Duration Summary</span>
+          </button>
           <button
             onClick={() => handleCatchUp()}
             className="px-3 py-1.5 bg-yellow-400 hover:bg-yellow-500 text-black text-xs font-bold border border-black shadow-[2px_2px_0px_0px_rgba(255,255,255,0.2)] flex items-center gap-1.5 transition-all cursor-pointer active:translate-x-[1px] active:translate-y-[1px]"
           >
             <Zap className="w-3.5 h-3.5 fill-black" />
-            <span>⚡ Catch Me Up (Unread Briefing)</span>
+            <span>⚡ Catch Me Up (100+ Unread)</span>
           </button>
-          <span className="text-xs font-mono text-gray-400 hidden sm:inline">Offline Local Inference</span>
         </div>
       </div>
 
@@ -302,6 +378,129 @@ export const ChatInterface: React.FC = () => {
           </button>
         </form>
       </div>
+
+      {/* Time-Window Summary Modal */}
+      {showTimeModal && (
+        <div className="absolute inset-0 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+          <div className="bg-white border-2 border-black p-6 max-w-lg w-full shadow-[6px_6px_0px_0px_rgba(0,0,0,1)] space-y-5 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between border-b border-gray-200 pb-3">
+              <div className="flex items-center gap-2">
+                <div className="p-1.5 bg-yellow-400 border border-black">
+                  <Clock className="w-4 h-4 text-black" />
+                </div>
+                <h3 className="font-bold text-base text-gray-900 uppercase tracking-tight">
+                  Time-Duration Chat Summary
+                </h3>
+              </div>
+              <button
+                onClick={() => setShowTimeModal(false)}
+                className="p-1 hover:bg-gray-100 border border-transparent hover:border-gray-300 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-4 text-xs font-mono">
+              {/* Chat Selector */}
+              <div>
+                <label className="block font-bold text-gray-700 uppercase mb-1.5">Select Chat Group:</label>
+                <select
+                  value={selectedChat}
+                  onChange={(e) => setSelectedChat(e.target.value)}
+                  className="w-full bg-gray-50 border border-gray-300 p-2.5 font-sans text-xs focus:border-black focus:outline-hidden"
+                >
+                  <option value="all">All Group Chats (Full Workspace)</option>
+                  {chats.map((c) => (
+                    <option key={c.chat_name} value={c.chat_name}>
+                      {c.chat_name} ({c.message_count} messages)
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Preset Selector */}
+              <div>
+                <label className="block font-bold text-gray-700 uppercase mb-1.5">Time Duration Preset:</label>
+                <div className="grid grid-cols-2 gap-2">
+                  {[
+                    { id: "last_2_hours", label: "🕒 Last 2 Hours" },
+                    { id: "last_24_hours", label: "📅 Last 24 Hours" },
+                    { id: "last_7_days", label: "📆 Last 7 Days" },
+                    { id: "all", label: "🗓️ All Time" },
+                  ].map((p) => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onClick={() => setSelectedPreset(p.id)}
+                      className={`p-2.5 text-left border transition-all cursor-pointer font-sans text-xs ${
+                        selectedPreset === p.id
+                          ? "bg-yellow-400 border-black font-bold text-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]"
+                          : "bg-white border-gray-300 text-gray-700 hover:bg-gray-50"
+                      }`}
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Custom Date Range Toggle */}
+              <div className="pt-2 border-t border-gray-100">
+                <button
+                  type="button"
+                  onClick={() => setSelectedPreset("custom")}
+                  className={`text-xs font-bold uppercase tracking-wider cursor-pointer mb-2 flex items-center gap-1.5 ${
+                    selectedPreset === "custom" ? "text-black" : "text-gray-500 hover:text-black"
+                  }`}
+                >
+                  <SlidersHorizontal className="w-3.5 h-3.5" />
+                  <span>Or Define Custom Date Range</span>
+                </button>
+
+                {selectedPreset === "custom" && (
+                  <div className="grid grid-cols-2 gap-2 mt-2">
+                    <div>
+                      <span className="text-[10px] text-gray-500 block mb-1">Start Date/Time:</span>
+                      <input
+                        type="datetime-local"
+                        value={startDate}
+                        onChange={(e) => setStartDate(e.target.value)}
+                        className="w-full bg-gray-50 border border-gray-300 p-2 text-xs font-sans focus:border-black focus:outline-hidden"
+                      />
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-gray-500 block mb-1">End Date/Time:</span>
+                      <input
+                        type="datetime-local"
+                        value={endDate}
+                        onChange={(e) => setEndDate(e.target.value)}
+                        className="w-full bg-gray-50 border border-gray-300 p-2 text-xs font-sans focus:border-black focus:outline-hidden"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-3 border-t border-gray-200">
+              <button
+                type="button"
+                onClick={() => setShowTimeModal(false)}
+                className="px-4 py-2 border border-gray-300 text-xs font-bold hover:bg-gray-100 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleRunTimelineSummary}
+                className="px-5 py-2 bg-black hover:bg-gray-800 text-white border border-black text-xs font-bold uppercase tracking-wider cursor-pointer shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] active:translate-x-[1px] active:translate-y-[1px]"
+              >
+                Generate Briefing
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

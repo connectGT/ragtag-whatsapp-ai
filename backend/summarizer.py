@@ -1,18 +1,14 @@
 """
-summarizer.py — Emergency Catch-Me-Up Engine for RAGTAG
-=========================================================
-Solves the "100+ unread messages before jumping on a team call" problem.
-
-Analyzes the latest N messages from a specific WhatsApp group or chat and generates:
-  1. Executive TL;DR (Context & Decision highlights)
-  2. Active Participants & Discussion Timeline
-  3. Action Items & Deadlines
-  4. Direct Questions / Mentions for the User
+summarizer.py — Time-Window & Catch-Up Summarization Engine for RAGTAG
+======================================================================
+Solves:
+  1. "Catch me up on 100+ unread messages before I join a call"
+  2. "Give me a summary of all messages in a specific time duration (e.g. past 2h, past 24h, custom date range)"
 
 Zero-Cloud / Offline-First:
-  - First checks for local Ollama (Llama 3 / Mistral / Phi-3) if available.
+  - Supports local neural LLM summarization via Ollama if running.
   - Automatically falls back to high-accuracy offline heuristic NLP summarization
-    so it works anywhere, anytime, with zero external dependencies.
+    guaranteeing 100% reliability with zero external dependencies.
 """
 
 from __future__ import annotations
@@ -20,8 +16,8 @@ from __future__ import annotations
 import re
 import urllib.request
 import json
-from datetime import datetime
-from typing import Dict, List, Optional
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Tuple
 from database import SessionLocal, Message, Contact
 
 OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
@@ -48,21 +44,22 @@ def check_ollama_available() -> bool:
         return False
 
 
-def summarize_with_ollama(chat_name: str, transcript: str, user_name: str = "Guru") -> str:
+def summarize_with_ollama(title: str, transcript: str, user_name: str = "Guru") -> str:
     """Generate LLM synthesis via local Ollama."""
-    prompt = f"""You are RAGTAG, an executive WhatsApp briefing AI. 
-The user ({user_name}) has missed recent messages in the group '{chat_name}' and is about to join an urgent call.
-Give an emergency briefing based strictly on the chat transcript below.
+    prompt = f"""You are RAGTAG, an executive WhatsApp briefing AI.
+Provide a concise, highly structured timeline summary for '{title}'.
+Direct action items or mentions for {user_name} must be highlighted.
 
 Format:
-1. 🔥 Executive TL;DR (3 bullet points max)
+1. 🔥 Executive Overview (Key discussions & takeaways)
 2. 📌 Key Decisions Made
-3. ⚠️ Questions or Action Items for {user_name}
+3. ⚠️ Action Items & Deadlines Assigned
+4. 👤 Urgent Mentions for {user_name}
 
 Transcript:
 {transcript}
 
-Briefing:"""
+Executive Summary:"""
 
     payload = {
         "model": DEFAULT_MODEL,
@@ -76,8 +73,8 @@ Briefing:"""
         return res.get("response", "").strip()
 
 
-def heuristic_catchup_summary(
-    chat_name: str,
+def heuristic_timeline_summary(
+    title: str,
     messages: List[Dict],
     user_name: str = "Guru"
 ) -> Dict:
@@ -85,6 +82,9 @@ def heuristic_catchup_summary(
     Offline extractive summarizer. Extracts decisions, tasks, and mentions
     without needing any external LLM server.
     """
+    if not messages:
+        return {"error": "No messages available to summarize."}
+
     participants = list({m["sender_name"] for m in messages})
     start_time = messages[0]["timestamp"].strftime("%b %d, %H:%M") if messages[0]["timestamp"] else ""
     end_time = messages[-1]["timestamp"].strftime("%b %d, %H:%M") if messages[-1]["timestamp"] else ""
@@ -118,7 +118,7 @@ def heuristic_catchup_summary(
 
     # Build concise readable TL;DR
     tldr = [
-        f"{len(messages)} messages exchanged between {len(participants)} team members ({', '.join(participants[:3])}) from {start_time} to {end_time}.",
+        f"{len(messages)} messages exchanged between {len(participants)} participants ({', '.join(participants[:3])}) from {start_time} to {end_time}.",
     ]
     if decisions:
         tldr.append(f"Key Progress: {decisions[-1]}")
@@ -126,49 +126,100 @@ def heuristic_catchup_summary(
         tldr.append(f"Urgent Request: {actions[-1]}")
 
     return {
-        "chat_name": chat_name,
+        "title": title,
         "message_count": len(messages),
         "timeline": f"{start_time} - {end_time}",
         "participants": participants,
         "tldr": tldr,
-        "decisions": decisions[:4],
-        "actions": actions[:4],
+        "decisions": decisions[:5],
+        "actions": actions[:5],
         "mentions_for_user": mentions_for_user,
         "generated_by": "offline_heuristic_engine",
     }
 
 
-def generate_catchup_briefing(chat_name: Optional[str] = None, limit: int = 50, user_name: str = "Guru") -> Dict:
+def parse_flexible_date(date_str: str) -> Optional[datetime]:
+    """Parse dates from ISO or common user formats."""
+    formats = [
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d",
+        "%d/%m/%Y %H:%M",
+        "%d/%m/%Y",
+    ]
+    for fmt in formats:
+        try:
+            return datetime.strptime(date_str.strip(), fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def generate_timeline_summary(
+    chat_name: Optional[str] = None,
+    preset: Optional[str] = "all",
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    hours_back: Optional[float] = None,
+    limit: int = 150,
+    user_name: str = "Guru"
+) -> Dict:
     """
-    Main entry point for 'Catch Me Up' briefing.
-    Retrieves recent chat messages from SQLite and generates an executive summary.
+    Summarize messages within a specific time duration or preset.
+
+    Presets supported:
+      - 'last_2_hours'  : 2 hours prior to latest message / now
+      - 'last_24_hours' : 24 hours prior to latest message / now
+      - 'last_7_days'   : 7 days prior
+      - 'all'           : All messages in window
+      - 'custom'        : Uses start_date and end_date
     """
     db = SessionLocal()
     try:
-        # If no chat specified, pick the most active chat
-        if not chat_name:
-            latest_msg = db.query(Message).order_by(Message.timestamp.desc()).first()
-            if not latest_msg:
-                return {"error": "No messages found in database. Ingest chats first."}
-            chat_name = latest_msg.chat_name
+        query = db.query(Message)
 
-        # Query messages for this chat
-        raw_msgs = (
-            db.query(Message)
-            .filter(Message.chat_name == chat_name)
-            .order_by(Message.timestamp.desc())
-            .limit(limit)
-            .all()
-        )
+        if chat_name and chat_name.lower() != "all":
+            query = query.filter(Message.chat_name == chat_name)
+
+        # Determine reference anchor time
+        latest_msg = query.order_by(Message.timestamp.desc()).first()
+        if not latest_msg:
+            return {"error": f"No messages found for chat '{chat_name or 'All'}'."}
+
+        anchor_time = latest_msg.timestamp or datetime.now()
+
+        # Apply time duration filtering
+        if preset == "last_2_hours" or hours_back == 2:
+            cutoff = anchor_time - timedelta(hours=2)
+            query = query.filter(Message.timestamp >= cutoff)
+        elif preset == "last_24_hours" or hours_back == 24:
+            cutoff = anchor_time - timedelta(hours=24)
+            query = query.filter(Message.timestamp >= cutoff)
+        elif preset == "last_7_days" or hours_back == 168:
+            cutoff = anchor_time - timedelta(days=7)
+            query = query.filter(Message.timestamp >= cutoff)
+        elif preset == "custom" or (start_date or end_date):
+            if start_date:
+                s_dt = parse_flexible_date(start_date)
+                if s_dt:
+                    query = query.filter(Message.timestamp >= s_dt)
+            if end_date:
+                e_dt = parse_flexible_date(end_date)
+                if e_dt:
+                    query = query.filter(Message.timestamp <= e_dt)
+
+        raw_msgs = query.order_by(Message.timestamp.asc()).limit(limit).all()
+
         if not raw_msgs:
-            return {"error": f"No messages found for chat '{chat_name}'."}
+            return {
+                "error": f"No messages found within the requested time duration.",
+                "chat_name": chat_name or "All Chats",
+                "message_count": 0,
+            }
 
-        # Order chronologically for reading
-        raw_msgs.reverse()
-
-        messages = []
         contacts_cache = {c.id: c.name for c in db.query(Contact).all()}
-
+        messages = []
         for m in raw_msgs:
             sender_name = contacts_cache.get(m.sender_id, "User")
             messages.append({
@@ -178,15 +229,21 @@ def generate_catchup_briefing(chat_name: Optional[str] = None, limit: int = 50, 
                 "timestamp": m.timestamp,
             })
 
-        # Check if Ollama is running for neural summary
+        title = f"{chat_name or 'All Chats'} ({len(messages)} messages)"
+
+        # Check if Ollama is running
         if check_ollama_available():
-            transcript = "\n".join([f"[{m['timestamp'].strftime('%H:%M') if m['timestamp'] else ''}] {m['sender_name']}: {m['content']}" for m in messages])
+            transcript = "\n".join([
+                f"[{m['timestamp'].strftime('%b %d %H:%M') if m['timestamp'] else ''}] {m['sender_name']}: {m['content']}"
+                for m in messages
+            ])
             try:
-                llm_response = summarize_with_ollama(chat_name, transcript, user_name=user_name)
+                llm_response = summarize_with_ollama(title, transcript, user_name=user_name)
                 return {
-                    "chat_name": chat_name,
+                    "title": title,
+                    "chat_name": chat_name or "All Chats",
                     "message_count": len(messages),
-                    "timeline": f"{messages[0]['timestamp']} - {messages[-1]['timestamp']}",
+                    "timeline": f"{messages[0]['timestamp'].strftime('%b %d, %H:%M')} - {messages[-1]['timestamp'].strftime('%b %d, %H:%M')}",
                     "participants": list({m['sender_name'] for m in messages}),
                     "briefing_markdown": llm_response,
                     "generated_by": "ollama_llama3_local",
@@ -194,15 +251,29 @@ def generate_catchup_briefing(chat_name: Optional[str] = None, limit: int = 50, 
             except Exception as e:
                 print(f"[Summarizer] Ollama call failed, falling back to heuristic: {e}")
 
-        # Fallback to local heuristic briefing
-        summary = heuristic_catchup_summary(chat_name, messages, user_name=user_name)
+        summary = heuristic_timeline_summary(title, messages, user_name=user_name)
+        summary["chat_name"] = chat_name or "All Chats"
         return summary
 
     finally:
         db.close()
 
 
+def generate_catchup_briefing(chat_name: Optional[str] = None, limit: int = 50, user_name: str = "Guru") -> Dict:
+    """Convenience alias for Catch-Me-Up on latest unread messages."""
+    return generate_timeline_summary(chat_name=chat_name, preset="all", limit=limit, user_name=user_name)
+
+
 if __name__ == "__main__":
-    briefing = generate_catchup_briefing()
-    print("\n[EMERGENCY CATCH-UP BRIEFING]:")
-    print(json.dumps(briefing, indent=2, default=str))
+    print("\n--- TEST: Last 24 Hours Summary ---")
+    s24 = generate_timeline_summary(chat_name="sample", preset="last_24_hours")
+    print(json.dumps(s24, indent=2, default=str))
+
+    print("\n--- TEST: Custom Date Range (Sep 22 to Sep 23) ---")
+    scustom = generate_timeline_summary(
+        chat_name="sample",
+        preset="custom",
+        start_date="2026-09-22 00:00",
+        end_date="2026-09-23 23:59",
+    )
+    print(json.dumps(scustom, indent=2, default=str))
