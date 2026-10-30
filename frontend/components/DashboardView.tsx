@@ -101,62 +101,6 @@ export const DashboardView: React.FC = () => {
     }
   };
 
-  const handleExportAllICS = () => {
-    const approvedTasks = tasks.filter(
-      (t) => (t.status || "").toLowerCase() === "approved"
-    );
-    const targetTasks = approvedTasks.length > 0 ? approvedTasks : tasks;
-    if (targetTasks.length === 0) return;
-
-    const events = targetTasks
-      .map((t) => {
-        let formattedDate: string;
-        try {
-          const raw = t.due_date || "";
-          formattedDate = raw
-            ? new Date(raw.replace(" at ", " "))
-                .toISOString()
-                .replace(/-|:|\.\d\d\d/g, "")
-            : new Date().toISOString().replace(/-|:|\.\d\d\d/g, "");
-        } catch {
-          formattedDate = new Date().toISOString().replace(/-|:|\.\d\d\d/g, "");
-        }
-
-        const sender = t.context_message?.sender_name || "WhatsApp Contact";
-        const chat = t.context_message?.chat_name || "WhatsApp Chat";
-        const content = t.context_message?.content || "";
-
-        return [
-          "BEGIN:VEVENT",
-          `SUMMARY:${t.task_name.replace(/\r?\n/g, " ")}`,
-          `DESCRIPTION:Extracted via RAGTAG Local AI from ${sender} in '${chat}': "${content.replace(/\r?\n/g, " ")}"`,
-          `DTSTART:${formattedDate}`,
-          `DTEND:${formattedDate}`,
-          "STATUS:CONFIRMED",
-          "END:VEVENT",
-        ].join("\r\n");
-      })
-      .join("\r\n");
-
-    const icsContent = [
-      "BEGIN:VCALENDAR",
-      "VERSION:2.0",
-      "PRODID:-//RAGTAG//Edge Task Extractor//EN",
-      events,
-      "END:VCALENDAR",
-    ].join("\r\n");
-
-    const blob = new Blob([icsContent], { type: "text/calendar;charset=utf-8" });
-    const link = document.createElement("a");
-    link.href = window.URL.createObjectURL(blob);
-    link.setAttribute(
-      "download",
-      `ragtag_action_items_${new Date().toISOString().slice(0, 10)}.ics`
-    );
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
 
   const handleApprove = (id: string) => {
     fetch("http://127.0.0.1:5000/api/tasks/" + id, {
@@ -314,15 +258,7 @@ export const DashboardView: React.FC = () => {
               )}
             </button>
 
-            {/* Export All ICS Button */}
-            <button
-              onClick={handleExportAllICS}
-              disabled={tasks.length === 0}
-              className="flex items-center gap-2 px-4 py-2 text-xs font-bold uppercase tracking-wider bg-white hover:bg-gray-100 text-black border-2 border-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] hover:shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] active:translate-x-[1px] active:translate-y-[1px] active:shadow-none transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <Download className="w-4 h-4 text-black" />
-              <span>Export All .ics</span>
-            </button>
+            
 
             {/* Refresh Tasks Button */}
             <button

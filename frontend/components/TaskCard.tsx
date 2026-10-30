@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
-import { Clock, User, Download, CheckCircle2, XCircle, MessageSquareCode } from "lucide-react";
+import { Clock, User, CalendarPlus, CheckCircle2, XCircle, MessageSquareCode } from "lucide-react";
 
 export interface ContextMessage {
   id: string;
@@ -22,6 +22,46 @@ export interface TaskCardProps {
   onApprove?: (id: string) => void;
   onDismiss?: (id: string) => void;
   onViewContext?: (message: ContextMessage) => void;
+}
+
+/**
+ * Build a Google Calendar "Add Event" URL — no OAuth, no API key needed.
+ * Opens calendar.google.com in a new tab with the event pre-filled.
+ * Format: https://calendar.google.com/calendar/render?action=TEMPLATE&...
+ */
+function buildGoogleCalendarUrl(
+  taskName: string,
+  dueDateStr: string,
+  description: string
+): string {
+  // Parse the due date — backend returns strings like "Sep 24, 2026 at 09:19"
+  let startDate: Date;
+  try {
+    startDate = new Date(dueDateStr.replace(" at ", " "));
+    if (isNaN(startDate.getTime())) throw new Error("invalid");
+  } catch {
+    // Default to tomorrow 9 AM if date can't be parsed
+    startDate = new Date();
+    startDate.setDate(startDate.getDate() + 1);
+    startDate.setHours(9, 0, 0, 0);
+  }
+
+  // End = start + 1 hour
+  const endDate = new Date(startDate.getTime() + 60 * 60 * 1000);
+
+  // Google Calendar expects: YYYYMMDDTHHmmssZ
+  const fmt = (d: Date) =>
+    d.toISOString().replace(/-|:|\.\d{3}/g, "").slice(0, 15) + "Z";
+
+  const params = new URLSearchParams({
+    action: "TEMPLATE",
+    text: taskName,
+    dates: `${fmt(startDate)}/${fmt(endDate)}`,
+    details: description,
+    // No location needed
+  });
+
+  return `https://calendar.google.com/calendar/render?${params.toString()}`;
 }
 
 export const TaskCard: React.FC<TaskCardProps> = ({
@@ -51,35 +91,15 @@ export const TaskCard: React.FC<TaskCardProps> = ({
     Dismissed: "bg-gray-100 text-gray-500 border border-gray-300 line-through opacity-60",
   };
 
-  const handleExportICS = () => {
-    const formattedDate = due_date
-      ? new Date(due_date).toISOString().replace(/-|:|\.\d\d\d/g, "")
-      : new Date().toISOString().replace(/-|:|\.\d\d\d/g, "");
-
-    const icsContent = [
-      "BEGIN:VCALENDAR",
-      "VERSION:2.0",
-      "PRODID:-//RAGTAG//Edge Task Extractor//EN",
-      "BEGIN:VEVENT",
-      `SUMMARY:${task_name}`,
-      `DESCRIPTION:Extracted via RAGTAG Local AI from ${context_message.sender_name} in '${context_message.chat_name}': "${context_message.content}"`,
-      `DTSTART:${formattedDate}`,
-      `DTEND:${formattedDate}`,
-      "STATUS:CONFIRMED",
-      "END:VEVENT",
-      "END:VCALENDAR",
-    ].join("\r\n");
-
-    const blob = new Blob([icsContent], { type: "text/calendar;charset=utf-8" });
-    const link = document.createElement("a");
-    link.href = window.URL.createObjectURL(blob);
-    link.setAttribute("download", `${task_name.replace(/\s+/g, "_")}.ics`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-
+  const handleApproveAndRemind = () => {
+    // 1. Mark as approved in the backend
     setCurrentStatus("Approved");
     if (onApprove) onApprove(id);
+
+    // 2. Open Google Calendar with the task pre-filled — user clicks Save once
+    const description = `From ${context_message.sender_name} in "${context_message.chat_name}":\n\n"${context_message.content}"\n\n— Extracted by RAGTAG Local AI`;
+    const url = buildGoogleCalendarUrl(task_name, due_date, description);
+    window.open(url, "_blank", "noopener,noreferrer");
   };
 
   const handleDismiss = () => {
@@ -153,22 +173,23 @@ export const TaskCard: React.FC<TaskCardProps> = ({
           )}
 
           <button
-            onClick={handleExportICS}
+            onClick={handleApproveAndRemind}
+            disabled={currentStatus === "Approved"}
             className={`flex items-center gap-2 px-4 py-2 text-xs font-bold border border-black uppercase tracking-wider transition-all duration-200 cursor-pointer ${
               currentStatus === "Approved"
-                ? "bg-emerald-400 text-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]"
+                ? "bg-emerald-400 text-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] cursor-default"
                 : "bg-yellow-400 hover:bg-yellow-500 text-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] hover:shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] active:translate-x-[1px] active:translate-y-[1px] active:shadow-none"
             }`}
           >
             {currentStatus === "Approved" ? (
               <>
                 <CheckCircle2 className="w-4 h-4" />
-                <span>Exported (.ics)</span>
+                <span>Added to Google</span>
               </>
             ) : (
               <>
-                <Download className="w-4 h-4" />
-                <span>Approve (.ics)</span>
+                <CalendarPlus className="w-4 h-4" />
+                <span>Approve + Remind</span>
               </>
             )}
           </button>
