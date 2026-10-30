@@ -7,9 +7,14 @@ backend/__pycache__/
 
 # WhatsApp backups and keys (DO NOT COMMIT)
 backend/backups/
+backend/user_archives/
 *.crypt15
 *.key
 msgstore.db
+
+# Temporary & Scratch files
+~$*
+scratch/
 
 # Vector Store
 backend/chroma_store/
