@@ -16,6 +16,8 @@ import {
   Zap,
   MessageSquare,
   ShieldCheck,
+  FileArchive,
+  Loader2,
 } from "lucide-react";
 
 interface SyncStatus {
@@ -49,6 +51,15 @@ export default function SyncPage() {
 
   // Feedback banner
   const [banner, setBanner] = useState<{ type: "success" | "info" | "error"; msg: string } | null>(null);
+
+  // Real-time ZIP file upload & pipeline progress state
+  const [zipUploadState, setZipUploadState] = useState<{
+    fileName: string;
+    fileSize: string;
+    progress: number;
+    phase: "uploading" | "processing" | "extracting" | "indexing" | "complete" | "error";
+    statusText: string;
+  } | null>(null);
 
   const appendLog = (msg: string, tag: "INFO" | "SUCCESS" | "TASK" | "ERROR" = "INFO") => {
     const ts = new Date().toLocaleTimeString("en-GB", { hour12: false });
@@ -89,29 +100,181 @@ export default function SyncPage() {
     }
 
     if (isZip) {
-      appendLog(`ZIP detected: "${file.name}" (${(file.size / 1024).toFixed(1)} KB). Uploading...`, "INFO");
+      const fileSizeStr =
+        file.size > 1024 * 1024
+          ? `${(file.size / (1024 * 1024)).toFixed(2)} MB`
+          : `${(file.size / 1024).toFixed(1)} KB`;
+
+      appendLog(`ZIP archive detected: "${file.name}" (${fileSizeStr}). Initiating upload...`, "INFO");
+
+      setZipUploadState({
+        fileName: file.name,
+        fileSize: fileSizeStr,
+        progress: 0,
+        phase: "uploading",
+        statusText: "Uploading ZIP archive to local engine...",
+      });
+      setLoading(true);
+
       const formData = new FormData();
       formData.append("file", file);
-      setLoading(true);
-      try {
-        const res = await fetch("http://localhost:5000/api/upload", { method: "POST", body: formData });
-        const data = await res.json();
-        if (data.status === "success") {
-          appendLog(`Done! ${data.messages_added} messages ingested, ${data.tasks_extracted} tasks extracted.`, "SUCCESS");
-          setBanner({ type: "success", msg: `Ingested ${data.messages_added} messages and extracted ${data.tasks_extracted} tasks from ZIP.` });
-          fetchStatus();
-        } else {
-          appendLog(`Error: ${data.message}`, "ERROR");
-          setBanner({ type: "error", msg: data.message });
+
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", "http://127.0.0.1:5000/api/upload");
+
+      // Track byte-level upload progress (0% -> 95%)
+      xhr.upload.onprogress = (evt) => {
+        if (evt.lengthComputable) {
+          const percentComplete = Math.min(95, Math.round((evt.loaded / evt.total) * 100));
+          const loadedStr =
+            evt.loaded > 1024 * 1024
+              ? `${(evt.loaded / (1024 * 1024)).toFixed(2)} MB`
+              : `${(evt.loaded / 1024).toFixed(0)} KB`;
+          const totalStr =
+            evt.total > 1024 * 1024
+              ? `${(evt.total / (1024 * 1024)).toFixed(2)} MB`
+              : `${(evt.total / 1024).toFixed(0)} KB`;
+
+          setZipUploadState((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  progress: percentComplete,
+                  phase: "uploading",
+                  statusText: `Uploading archive... ${percentComplete}% (${loadedStr} of ${totalStr})`,
+                }
+              : null
+          );
         }
-      } catch (err: any) {
-        appendLog(`Upload failed: ${err.message}`, "ERROR");
-        setBanner({ type: "error", msg: `Upload failed: ${err.message}` });
-      } finally {
+      };
+
+      // Server-side processing simulation timers while backend unzips, ingests & extracts tasks
+      let stageTimer1: any = null;
+      let stageTimer2: any = null;
+
+      xhr.upload.onload = () => {
+        setZipUploadState((prev) =>
+          prev
+            ? {
+                ...prev,
+                progress: 96,
+                phase: "processing",
+                statusText: "Unpacking archive & ingesting messages into SQLite...",
+              }
+            : null
+        );
+        appendLog("ZIP uploaded. Unpacking archive & ingesting messages into ground truth SQLite...", "INFO");
+
+        stageTimer1 = setTimeout(() => {
+          setZipUploadState((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  progress: 98,
+                  phase: "extracting",
+                  statusText: "Analyzing conversational context & extracting actionable tasks...",
+                }
+              : null
+          );
+          appendLog("Running task extraction pipeline with conversational thread resolution...", "INFO");
+        }, 1200);
+
+        stageTimer2 = setTimeout(() => {
+          setZipUploadState((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  progress: 99,
+                  phase: "indexing",
+                  statusText: "Synchronizing semantic vectors into ChromaDB...",
+                }
+              : null
+          );
+          appendLog("Embedding ingested messages into local ChromaDB collection...", "INFO");
+        }, 3000);
+      };
+
+      xhr.onload = () => {
+        clearTimeout(stageTimer1);
+        clearTimeout(stageTimer2);
         setLoading(false);
-        // Reset file input
         e.target.value = "";
-      }
+
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            const data = JSON.parse(xhr.responseText);
+            if (data.status === "success") {
+              setZipUploadState({
+                fileName: file.name,
+                fileSize: fileSizeStr,
+                progress: 100,
+                phase: "complete",
+                statusText: `Completed! Ingested ${data.messages_added} messages, extracted ${data.tasks_extracted} tasks.`,
+              });
+              appendLog(
+                `Done! ${data.messages_added} messages ingested, ${data.tasks_extracted} tasks extracted from "${file.name}".`,
+                "SUCCESS"
+              );
+              setBanner({
+                type: "success",
+                msg: `Ingested ${data.messages_added} messages and extracted ${data.tasks_extracted} tasks from ${file.name}.`,
+              });
+              fetchStatus();
+              // Keep success bar visible for 6 seconds
+              setTimeout(() => {
+                setZipUploadState(null);
+              }, 6000);
+            } else {
+              setZipUploadState({
+                fileName: file.name,
+                fileSize: fileSizeStr,
+                progress: 100,
+                phase: "error",
+                statusText: `Error: ${data.message || "Failed to process ZIP"}`,
+              });
+              appendLog(`Error: ${data.message}`, "ERROR");
+              setBanner({ type: "error", msg: data.message });
+            }
+          } catch (err: any) {
+            setZipUploadState({
+              fileName: file.name,
+              fileSize: fileSizeStr,
+              progress: 100,
+              phase: "error",
+              statusText: `Failed to parse response: ${err.message}`,
+            });
+            appendLog(`Parse error: ${err.message}`, "ERROR");
+          }
+        } else {
+          setZipUploadState({
+            fileName: file.name,
+            fileSize: fileSizeStr,
+            progress: 100,
+            phase: "error",
+            statusText: `Upload failed with HTTP status ${xhr.status}`,
+          });
+          appendLog(`Upload failed with HTTP status ${xhr.status}`, "ERROR");
+          setBanner({ type: "error", msg: `Upload failed (HTTP ${xhr.status}).` });
+        }
+      };
+
+      xhr.onerror = () => {
+        clearTimeout(stageTimer1);
+        clearTimeout(stageTimer2);
+        setLoading(false);
+        e.target.value = "";
+        setZipUploadState({
+          fileName: file.name,
+          fileSize: fileSizeStr,
+          progress: 100,
+          phase: "error",
+          statusText: "Network error connecting to local RAGTAG backend (port 5000).",
+        });
+        appendLog("Network error during file upload.", "ERROR");
+        setBanner({ type: "error", msg: "Network error connecting to backend API (port 5000)." });
+      };
+
+      xhr.send(formData);
       return;
     }
 
@@ -334,12 +497,174 @@ export default function SyncPage() {
             </p>
           </div>
 
-          <label className="px-4 py-2 bg-yellow-400 hover:bg-yellow-500 text-black border-2 border-black text-xs font-bold cursor-pointer flex items-center gap-2 shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] active:translate-x-[0.5px] active:translate-y-[0.5px] transition-all">
-            <Upload className="w-4 h-4" />
-            <span>Choose .txt or .zip</span>
-            <input type="file" accept=".txt,.zip" onChange={handleFileUpload} className="hidden" />
+          <label className={`px-4 py-2 text-black border-2 border-black text-xs font-bold cursor-pointer flex items-center gap-2 shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] active:translate-x-[0.5px] active:translate-y-[0.5px] transition-all ${
+            loading ? "bg-gray-200 opacity-60 cursor-not-allowed pointer-events-none" : "bg-yellow-400 hover:bg-yellow-500"
+          }`}>
+            {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+            <span>{loading ? "Processing ZIP..." : "Choose .txt or .zip"}</span>
+            <input type="file" accept=".txt,.zip" onChange={handleFileUpload} disabled={loading} className="hidden" />
           </label>
         </div>
+
+        {/* Real-time ZIP Upload & Ingestion Progress Bar */}
+        {zipUploadState && (
+          <div className="border-2 border-black p-5 bg-amber-50/70 shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] space-y-4 transition-all">
+            {/* Header: File info & status pill */}
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <div className="flex items-center gap-3">
+                <div
+                  className={`p-2 border-2 border-black ${
+                    zipUploadState.phase === "complete"
+                      ? "bg-emerald-400 text-black"
+                      : zipUploadState.phase === "error"
+                      ? "bg-rose-500 text-white"
+                      : "bg-yellow-400 text-black"
+                  }`}
+                >
+                  <FileArchive className="w-5 h-5" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-mono font-bold text-black uppercase tracking-wider">
+                      {zipUploadState.fileName}
+                    </span>
+                    <span className="text-[10px] font-mono px-1.5 py-0.5 bg-black text-white font-bold">
+                      {zipUploadState.fileSize}
+                    </span>
+                  </div>
+                  <p className="text-[11px] font-mono text-gray-700 flex items-center gap-1.5 mt-0.5">
+                    {zipUploadState.phase === "complete" ? (
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 inline shrink-0" />
+                    ) : zipUploadState.phase === "error" ? (
+                      <AlertCircle className="w-3.5 h-3.5 text-rose-600 inline shrink-0" />
+                    ) : (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-black inline shrink-0" />
+                    )}
+                    <span>{zipUploadState.statusText}</span>
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-3">
+                <span
+                  className={`text-xs font-mono font-black px-2.5 py-1 border border-black uppercase ${
+                    zipUploadState.phase === "complete"
+                      ? "bg-emerald-300 text-black"
+                      : zipUploadState.phase === "error"
+                      ? "bg-rose-100 text-rose-700 border-rose-600"
+                      : "bg-black text-yellow-400"
+                  }`}
+                >
+                  {zipUploadState.phase === "uploading" && "Uploading Archive"}
+                  {zipUploadState.phase === "processing" && "Unpacking & Parsing"}
+                  {zipUploadState.phase === "extracting" && "AI Task Extraction"}
+                  {zipUploadState.phase === "indexing" && "ChromaDB Sync"}
+                  {zipUploadState.phase === "complete" && "Ready / Ingested"}
+                  {zipUploadState.phase === "error" && "Failed"}
+                </span>
+                <span className="text-sm font-mono font-black text-black">
+                  {zipUploadState.progress}%
+                </span>
+                {zipUploadState.phase === "complete" && (
+                  <button
+                    onClick={() => setZipUploadState(null)}
+                    className="p-1 hover:bg-black hover:text-white transition-colors text-black text-xs font-mono"
+                    title="Dismiss"
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Progress Bar Container */}
+            <div className="w-full h-4 bg-white border-2 border-black p-0.5 overflow-hidden shadow-inner">
+              <div
+                className={`h-full transition-all duration-300 ${
+                  zipUploadState.phase === "complete"
+                    ? "bg-emerald-400"
+                    : zipUploadState.phase === "error"
+                    ? "bg-rose-500"
+                    : "bg-yellow-400"
+                }`}
+                style={{
+                  width: `${zipUploadState.progress}%`,
+                  backgroundImage:
+                    zipUploadState.phase !== "complete" && zipUploadState.phase !== "error"
+                      ? "linear-gradient(45deg, rgba(0,0,0,0.18) 25%, transparent 25%, transparent 50%, rgba(0,0,0,0.18) 50%, rgba(0,0,0,0.18) 75%, transparent 75%, transparent)"
+                      : "none",
+                  backgroundSize: "20px 20px",
+                }}
+              />
+            </div>
+
+            {/* Ingestion Pipeline Stepper */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2 pt-2 border-t border-gray-300">
+              <div
+                className={`flex items-center gap-2 text-[10px] font-mono ${
+                  zipUploadState.progress > 0 ? "font-bold text-black" : "text-gray-400"
+                }`}
+              >
+                {zipUploadState.progress >= 95 ? (
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                ) : (
+                  <span className="w-3.5 h-3.5 rounded-full border border-black flex items-center justify-center text-[9px] font-bold">
+                    1
+                  </span>
+                )}
+                <span>1. Upload ZIP</span>
+              </div>
+              <div
+                className={`flex items-center gap-2 text-[10px] font-mono ${
+                  zipUploadState.progress >= 96 ? "font-bold text-black" : "text-gray-400"
+                }`}
+              >
+                {zipUploadState.progress >= 98 ? (
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                ) : zipUploadState.phase === "processing" ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-black shrink-0" />
+                ) : (
+                  <span className="w-3.5 h-3.5 rounded-full border border-gray-400 flex items-center justify-center text-[9px]">
+                    2
+                  </span>
+                )}
+                <span>2. SQLite Ingest</span>
+              </div>
+              <div
+                className={`flex items-center gap-2 text-[10px] font-mono ${
+                  zipUploadState.progress >= 98 ? "font-bold text-black" : "text-gray-400"
+                }`}
+              >
+                {zipUploadState.progress >= 99 ? (
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                ) : zipUploadState.phase === "extracting" ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-black shrink-0" />
+                ) : (
+                  <span className="w-3.5 h-3.5 rounded-full border border-gray-400 flex items-center justify-center text-[9px]">
+                    3
+                  </span>
+                )}
+                <span>3. Extract Tasks</span>
+              </div>
+              <div
+                className={`flex items-center gap-2 text-[10px] font-mono ${
+                  zipUploadState.progress >= 100 ? "font-bold text-emerald-700" : "text-gray-400"
+                }`}
+              >
+                {zipUploadState.phase === "complete" ? (
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                ) : zipUploadState.phase === "indexing" ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-black shrink-0" />
+                ) : (
+                  <span className="w-3.5 h-3.5 rounded-full border border-gray-400 flex items-center justify-center text-[9px]">
+                    4
+                  </span>
+                )}
+                <span>4. ChromaDB Vectors</span>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* How to export guide */}
         <div className="bg-gray-50 border border-gray-200 p-4 space-y-2">
