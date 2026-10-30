@@ -19,6 +19,7 @@ import os
 import re
 import sqlite3
 import uuid
+import hashlib
 import zipfile
 import tempfile
 from datetime import datetime
@@ -56,6 +57,38 @@ def is_system_message(text: str) -> bool:
             return True
     return False
 
+
+
+def clean_chat_name_from_path(filepath_or_name: str) -> str:
+    """
+    Extract a clean WhatsApp group or contact name from a ZIP or TXT export filename.
+    Examples:
+      - 'WhatsApp Chat - Government office of Aerospace club.zip' -> 'Government office of Aerospace club'
+      - 'WhatsApp Chat with CSE unofficial 2029.txt' -> 'CSE unofficial 2029'
+      - 'Aerospace Members 2026.zip' -> 'Aerospace Members 2026'
+    """
+    stem = Path(filepath_or_name).stem
+    # Remove common WhatsApp export prefixes
+    clean = re.sub(r"^WhatsApp\s+Chat\s*[-–—_]\s*", "", stem, flags=re.IGNORECASE)
+    clean = re.sub(r"^WhatsApp\s+Chat\s+with\s+", "", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"^WhatsApp\s+Chat\s*", "", clean, flags=re.IGNORECASE)
+    clean = clean.replace("_chat", "").strip()
+    return clean or "WhatsApp Chat"
+
+
+def compute_message_id(chat_name: str, sender_name: str, timestamp: Optional[datetime], content: str) -> str:
+    """
+    Computes a deterministic, collision-resistant message fingerprint ID.
+    Enforces 100% idempotent ingestion: re-importing the same chat log or overlapping
+    dates will yield the EXACT SAME ID, preventing duplicates or storage bloat.
+    """
+    ts_str = timestamp.strftime("%Y-%m-%d %H:%M") if timestamp else ""
+    norm_content = " ".join(content.strip().split())
+    norm_sender = sender_name.strip().lower()
+    norm_chat = chat_name.strip().lower()
+    raw_key = f"{norm_chat}|{norm_sender}|{ts_str}|{norm_content}"
+    h = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()[:22]
+    return f"msg_{h}"
 
 # ── Step 1b: ZIP Export Extraction ────────────────────────────────────────────
 
@@ -197,8 +230,12 @@ TXT_PATTERNS = [
 ]
 
 def parse_txt_timestamp(date_str: str, time_str: str) -> datetime:
-    """Flexible datetime parsing across common regional formats."""
-    clean_str = f"{date_str.strip()} {time_str.strip().upper()}"
+    """Flexible datetime parsing across common regional formats with unicode normalization."""
+    # Replace narrow non-breaking spaces ( ,  ) with standard ASCII space
+    clean_date = re.sub(r"[\s\u202f\u00a0]+", " ", date_str).strip()
+    clean_time = re.sub(r"[\s\u202f\u00a0]+", " ", time_str).strip().upper()
+    clean_str = f"{clean_date} {clean_time}"
+
     formats = [
         "%d/%m/%Y %H:%M",
         "%d/%m/%y %H:%M",
@@ -208,24 +245,38 @@ def parse_txt_timestamp(date_str: str, time_str: str) -> datetime:
         "%d/%m/%y %I:%M:%S %p",
         "%m/%d/%Y %I:%M %p",
         "%m/%d/%y %I:%M %p",
+        "%m/%d/%Y %I:%M:%S %p",
+        "%m/%d/%y %I:%M:%S %p",
+        "%d-%m-%Y %H:%M",
+        "%d-%m-%y %H:%M",
+        "%d-%m-%Y %I:%M %p",
+        "%d-%m-%y %I:%M %p",
         "%Y-%m-%d %H:%M",
+        "%Y-%m-%d %H:%M:%S",
     ]
     for fmt in formats:
         try:
             return datetime.strptime(clean_str, fmt)
         except ValueError:
             continue
-    return datetime.now()
+
+    # Deterministic fallback anchored to a fixed year so hashes remain 100% stable
+    return datetime(2026, 1, 1, 0, 0, 0)
 
 
 def parse_exported_txt(txt_path: str, default_chat_name: Optional[str] = None) -> List[Dict]:
     """
     Parse a standard exported WhatsApp .txt file, including multiline messages.
+    Uses deterministic message fingerprint IDs to prevent duplicate insertion.
     """
     if not os.path.exists(txt_path):
         raise FileNotFoundError(f"Export file not found at: {txt_path}")
 
-    chat_name = default_chat_name or Path(txt_path).stem.replace("WhatsApp Chat - ", "").replace("_chat", "")
+    if default_chat_name and default_chat_name.strip() and default_chat_name.strip().lower() not in ("chat", "_chat"):
+        chat_name = default_chat_name.strip()
+    else:
+        chat_name = clean_chat_name_from_path(txt_path)
+
     print(f"[Ingest] Reading exported chat file: {txt_path} (Chat: '{chat_name}')...")
 
     with open(txt_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -241,6 +292,13 @@ def parse_exported_txt(txt_path: str, default_chat_name: Optional[str] = None) -
             if match:
                 matched = True
                 if current_msg and not is_system_message(current_msg["content"]):
+                    # Compute final fingerprint with full (possibly multiline) content
+                    current_msg["id"] = compute_message_id(
+                        current_msg["chat_name"],
+                        current_msg["sender_name"],
+                        current_msg["timestamp"],
+                        current_msg["content"]
+                    )
                     messages.append(current_msg)
 
                 d = match.group("date")
@@ -250,7 +308,7 @@ def parse_exported_txt(txt_path: str, default_chat_name: Optional[str] = None) -
                 ts = parse_txt_timestamp(d, t)
 
                 current_msg = {
-                    "id": str(uuid.uuid4()),
+                    "id": "",  # will be computed on message close
                     "sender_name": sender,
                     "sender_jid": f"{sender.lower().replace(' ', '_')}@s.whatsapp.net",
                     "chat_name": chat_name,
@@ -264,9 +322,15 @@ def parse_exported_txt(txt_path: str, default_chat_name: Optional[str] = None) -
             current_msg["content"] += "\n" + line.rstrip()
 
     if current_msg and not is_system_message(current_msg["content"]):
+        current_msg["id"] = compute_message_id(
+            current_msg["chat_name"],
+            current_msg["sender_name"],
+            current_msg["timestamp"],
+            current_msg["content"]
+        )
         messages.append(current_msg)
 
-    print(f"[Ingest] Extracted {len(messages)} messages from {Path(txt_path).name}.")
+    print(f"[Ingest] Extracted {len(messages)} messages for chat '{chat_name}'.")
     return messages
 
 
@@ -283,15 +347,28 @@ def save_to_ragtag_db(parsed_messages: List[Dict]) -> Tuple[int, int]:
     contacts_added = 0
     messages_added = 0
 
+    new_messages: List[Dict] = []
     try:
         # Cache existing contacts and messages
         existing_contacts = {c.name.lower(): c for c in session.query(Contact).all()}
-        existing_msg_ids = {m.id for m in session.query(Message.id).all()}
+        existing_msg_ids = {row[0] for row in session.query(Message.id).all()}
 
         for item in parsed_messages:
+            msg_id = item["id"]
+            if not msg_id:
+                msg_id = compute_message_id(
+                    item.get("chat_name", "Chat"),
+                    item.get("sender_name", "User"),
+                    item.get("timestamp"),
+                    item.get("content", "")
+                )
+                item["id"] = msg_id
+
+            # Idempotent skip: if message already exists, do NOT duplicate it!
+            if msg_id in existing_msg_ids:
+                continue
+
             sender_key = item["sender_name"].lower()
-            
-            # Find or create Contact
             if sender_key not in existing_contacts:
                 contact = Contact(
                     id=item["sender_jid"],
@@ -305,22 +382,22 @@ def save_to_ragtag_db(parsed_messages: List[Dict]) -> Tuple[int, int]:
             else:
                 contact = existing_contacts[sender_key]
 
-            # Insert Message if not already present
-            if item["id"] not in existing_msg_ids:
-                msg = Message(
-                    id=item["id"],
-                    sender_id=contact.id,
-                    chat_name=item["chat_name"],
-                    timestamp=item["timestamp"],
-                    content=item["content"],
-                )
-                session.add(msg)
-                existing_msg_ids.add(item["id"])
-                messages_added += 1
+            msg = Message(
+                id=msg_id,
+                sender_id=contact.id,
+                chat_name=item["chat_name"],
+                timestamp=item["timestamp"],
+                content=item["content"],
+            )
+            session.add(msg)
+            existing_msg_ids.add(msg_id)
+            messages_added += 1
+            new_messages.append(item)
 
         session.commit()
-        print(f"[SQLite] [OK] Ingestion committed: {contacts_added} new contacts, {messages_added} new messages.")
-        return contacts_added, messages_added
+        skipped_count = len(parsed_messages) - messages_added
+        print(f"[SQLite] [OK] Ingestion committed: {contacts_added} new contacts, {messages_added} new messages (skipped {skipped_count} existing duplicates).")
+        return contacts_added, messages_added, new_messages
 
     except Exception as e:
         session.rollback()
@@ -370,53 +447,71 @@ def run_ingestion(source_path: Optional[str] = None, sync_vectors: bool = True) 
 
     print(f"[Pipeline] Source identified: {target}")
 
-    # Resolve ZIP -> extract inner _chat.txt first
+    # Clean chat name directly from original archive or text file name
+    inferred_chat_name = clean_chat_name_from_path(target)
+    print(f"[Pipeline] Inferred chat/group name: '{inferred_chat_name}'")
+
     if target.endswith(".zip"):
         try:
-            target = extract_txt_from_zip(target)
+            txt_path = extract_txt_from_zip(target)
+            messages = parse_exported_txt(txt_path, default_chat_name=inferred_chat_name)
         except (zipfile.BadZipFile, ValueError) as e:
             return {"status": "error", "message": f"ZIP extraction failed: {e}"}
-
-    if target.endswith(".db"):
+    elif target.endswith(".db"):
         messages = parse_decrypted_msgstore(target)
     elif target.endswith(".txt"):
-        messages = parse_exported_txt(target)
+        messages = parse_exported_txt(target, default_chat_name=inferred_chat_name)
     else:
         return {"status": "error", "message": "Unsupported file format. Use .db, .txt, or .zip"}
 
     if not messages:
         return {"status": "warning", "message": "No valid messages found in source."}
 
-    contacts_cnt, messages_cnt = save_to_ragtag_db(messages)
+    contacts_cnt, messages_cnt, new_messages = save_to_ragtag_db(messages)
 
+    # Only sync vectors and extract tasks for GENUINELY NEW messages
     vector_count = 0
-    if sync_vectors:
+    if sync_vectors and new_messages:
         try:
-            print("\n[Pipeline] Syncing newly ingested messages to ChromaDB...")
+            print(f"\n[Pipeline] Syncing {len(new_messages)} newly ingested messages to ChromaDB...")
             import vector_db
-            vector_db.main(reset=False)
-            vector_count = len(messages)
+            coll = vector_db.init_chroma(reset=False)
+            db_messages = [
+                Message(
+                    id=m["id"],
+                    sender_id=m["sender_jid"],
+                    chat_name=m["chat_name"],
+                    timestamp=m["timestamp"],
+                    content=m["content"]
+                )
+                for m in new_messages
+            ]
+            chunks = vector_db.chunk_messages(db_messages)
+            if chunks:
+                vector_db.embed_and_store(coll, chunks)
+                vector_count = len(chunks)
         except Exception as err:
             print(f"[Pipeline] Vector sync warning: {err}")
 
-    # ── Automated Task Extraction Hook (Milestone M1) ─────────────────────────
+    # ── Automated Task Extraction Hook (Only on new messages) ────────────────
     tasks_extracted_count = 0
-    try:
-        print("\n[Pipeline] Running automated task extraction on newly ingested messages...")
-        import task_extractor
-        session = SessionLocal()
+    if new_messages:
         try:
-            extracted_tasks = task_extractor.extract_tasks_from_messages(messages, mode="auto")
-            if extracted_tasks:
-                save_res = task_extractor.save_extracted_tasks(session, extracted_tasks)
-                tasks_extracted_count = save_res.get("new_tasks_created", 0)
-                print(f"[Pipeline] [OK] Auto-extracted {tasks_extracted_count} action items from ingested messages.")
-            else:
-                print("[Pipeline] No action items found in ingested messages.")
-        finally:
-            session.close()
-    except Exception as err:
-        print(f"[Pipeline] ⚠ Task extraction warning (ingestion will not fail): {err}")
+            print(f"\n[Pipeline] Running automated task extraction on {len(new_messages)} new messages...")
+            import task_extractor
+            session = SessionLocal()
+            try:
+                extracted_tasks = task_extractor.extract_tasks_from_messages(new_messages, mode="auto")
+                if extracted_tasks:
+                    save_res = task_extractor.save_extracted_tasks(session, extracted_tasks)
+                    tasks_extracted_count = save_res.get("new_tasks_created", 0)
+                    print(f"[Pipeline] [OK] Auto-extracted {tasks_extracted_count} action items from newly ingested messages.")
+                else:
+                    print("[Pipeline] No action items found in new messages.")
+            finally:
+                session.close()
+        except Exception as err:
+            print(f"[Pipeline] ⚠ Task extraction warning: {err}")
 
     return {
         "status": "success",
