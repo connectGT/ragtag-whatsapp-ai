@@ -185,6 +185,9 @@ class TestApiContracts(unittest.TestCase):
         self.assertEqual(data_post.get("user_name"), "Prof. Sharma Evaluator")
         self.assertEqual(data_post.get("inference_mode"), "heuristic_only")
 
+        # 3. Restore default active user settings
+        self.client.post("/api/settings", json={"user_name": "Guru", "inference_mode": "auto"})
+
     # ── 6. POST /api/simulation/inject (Milestone M2) ─────────────────────────────
     @unittest.skipUnless(is_route_registered("/api/simulation/inject"), "Endpoint pending registration in Milestone M2")
     def test_post_simulation_inject_contract(self):

@@ -59,16 +59,23 @@ SYSTEM_PATTERNS = [
     r"created group",
     r"added you",
     r"left the group",
-    r"changed the group subject"
+    r"changed the group subject",
+    r"^Poll:\s*",
+    r"^Are you going to be present\b",
+    r"\blooking forward to\b",
+    r"\bcarried forward\b",
+    r"\bcarry forward\b",
+    r"\bstep forward\b",
+    r"\bmoving forward\b",
 ]
 
 NON_ACTIONABLE_REGEX = re.compile(
-    r"^(?:ok|okay|k|noted|cool|great|thanks|thank you|thx|done|sure|yes|no|yep|nope|got it|understood|will do|good morning|good evening|good night|hello|hi|hey|welcome)[.!]?$",
+    r"^(?:ok|okay|k|noted|cool|great|thanks|thank you|thx|done|sure|yes|no|yep|nope|got it|understood|will do|good morning|good evening|good night|hello|hi|hey|welcome|congratulations)[.!]?$",
     re.IGNORECASE
 )
 
 STATUS_INQUIRY_REGEX = re.compile(
-    r"^(?:did|have|has|were|was|are)\s+(?:you|we|anyone|they|he|she)\b.*\?",
+    r"(?:^(?:did|have|has|were|was|are|can|could|will|would|is)\s+(?:you|we|anyone|they|he|she)\b.*\?|\bkahan\s+upload\s+krna\b.*\?|\bdubara\s+bhar\s+dun\b.*\?|\battendance\?+|\?{2,}|\bkyy\?+)",
     re.IGNORECASE
 )
 
@@ -237,50 +244,111 @@ def clean_name_for_matching(name: str) -> str:
     return clean.strip().lower()
 
 
-def detect_assignee(text: str, user_name: str, is_direct_chat: bool = False) -> Tuple[str, bool]:
+def clean_display_name(name: str) -> str:
+    """Cleans a sender/contact name to a friendly human display name."""
+    if not name:
+        return ""
+    # Strip WhatsApp tilde, @, and common prefixes like 'Cse ', 'Club - ', 'MITS '
+    cleaned = re.sub(r"^[@~]+", "", name).strip()
+    cleaned = re.sub(r"^(?:cse|club\s*-\s*|mits)\s+", "", cleaned, flags=re.IGNORECASE).strip()
+    # Strip common suffixes like 'senior', 'madam', 'sir', 'masterji'
+    cleaned = re.sub(r"\s+(?:senior|madam|sir|masterji|mits)\b.*$", "", cleaned, flags=re.IGNORECASE).strip()
+    # Remove emojis and trailing symbols
+    cleaned = re.sub(r"[^\w\s+.-]", "", cleaned, flags=re.UNICODE).strip()
+    return cleaned or name
+
+
+def extract_leading_tag(text: str) -> str:
+    """Extracts a leading WhatsApp mention or direct address from text."""
+    text_clean = text.strip()
+    # Check @~tag (WhatsApp push name)
+    m = re.match(r"^@~([A-Za-z0-9_]+)", text_clean)
+    if m:
+        return m.group(1).strip()
+
+    # Check @all / @everyone
+    if re.match(r"^@\??(?:all|everyone)\??\b", text_clean, re.IGNORECASE):
+        return "Team / All"
+
+    # Check @single_token (e.g. @Guru, @Eshanya, @Tanishk)
+    m = re.match(r"^@([A-Za-z0-9_]+)", text_clean)
+    if m:
+        return m.group(1).strip()
+
+    # Check prefix address: "Eshanya, please..." or "Tanishk: send..."
+    m = re.match(r"^([A-Z][a-z]+)[,:]\s+", text_clean)
+    if m:
+        tag = m.group(1).strip()
+        if tag.lower() not in ("poll", "note", "update", "reminder", "today", "haaa", "okay", "yes", "no"):
+            return tag
+
+    return ""
+
+
+def detect_assignee(
+    text: str,
+    user_name: str,
+    is_direct_chat: bool = False,
+    sender_name: str = ""
+) -> Tuple[str, bool]:
     """
     Detects who the task is directed at:
-    - Matches user by name/nickname (e.g. Guru, @guru, @Guru🔥, guru tiwari)
-    - Matches team mentions (all, everyone, team ragtag)
-    - Matches explicit other contacts (@Eshanya, Eshanya:, etc.)
+    - Matches user by name/nickname (e.g. Guru, @guru, @Guru, @~Guru, guru)
+    - Matches team mentions (all, everyone, team ragtag, all teams)
+    - Matches explicit other contacts (@~Tanishk, @Eshanya, Eshanya:, etc.)
+    - Understands that "me" / "to me" refers to sender_name, NOT to user_name (unless sender is user_name).
     Returns: (assigned_to: str, is_for_me: bool)
     """
     clean_target = clean_name_for_matching(user_name) or "guru"
     target_tokens = clean_target.split()
     first_name = target_tokens[0] if target_tokens else "guru"
 
-    # Regex pattern to match user mention with or without @ and tolerant to surrounding emojis/punctuation
-    # e.g. @guru, @Guru, @Guru✨, Guru:, Guru,
-    user_pattern = rf"(?:@\s*{re.escape(first_name)}|{re.escape(first_name)})"
-    has_user_mention = bool(re.search(user_pattern, text, re.IGNORECASE))
+    # 1. Check if directive is explicitly addressed to someone at the start
+    leading_tag = extract_leading_tag(text)
+    if leading_tag:
+        clean_tag = clean_name_for_matching(leading_tag)
+        if clean_tag in ("all", "everyone", "team"):
+            return "Team / All", True
+        elif clean_tag == first_name:
+            return user_name, True
+        else:
+            return clean_display_name(leading_tag), False
 
-    # Check for team / everyone mentions
-    team_pattern = r"(?:@all|@everyone|all\s+teams?|everyone|team\s+ragtag|team)"
-    has_team_mention = bool(re.search(team_pattern, text, re.IGNORECASE))
-
-    if has_user_mention:
+    # 2. Check if user is explicitly mentioned anywhere with @ or @~ or as direct vocative
+    user_pattern = rf"(?:@~?\s*{re.escape(first_name)}\b|\b{re.escape(first_name)}[,:]?\s+)"
+    if re.search(user_pattern, text, re.IGNORECASE):
         return user_name, True
-    elif has_team_mention:
+
+    # 3. Check for team / everyone mentions anywhere
+    team_pattern = r"(?:@\\??all\\??|@everyone|\ball\s+teams?\b|\beveryone\b|\bteam\s+ragtag\b|\bteam\b)"
+    if re.search(team_pattern, text, re.IGNORECASE):
         return "Team / All", True
 
-    # Check if another name is explicitly tagged at start or with @
-    other_mention = re.search(r"@([A-Za-z0-9_]+)", text)
+    # 4. Check if another person is tagged anywhere with @~ or @
+    other_mention = re.search(r"@~?([A-Za-z0-9_]+)", text)
     if other_mention:
         mentioned_tag = other_mention.group(1).strip()
-        if clean_name_for_matching(mentioned_tag) != first_name:
-            return mentioned_tag, False
+        cleaned_tag = clean_name_for_matching(mentioned_tag)
+        if cleaned_tag in ("all", "everyone", "team"):
+            return "Team / All", True
+        elif cleaned_tag == first_name:
+            return user_name, True
+        else:
+            return clean_display_name(mentioned_tag), False
 
-    # Check if someone else is addressed at the start e.g. "Eshanya, please finish..."
-    prefix_address = re.match(r"^([A-Z][a-z]+)[,:]\s+", text)
-    if prefix_address:
-        addressed = prefix_address.group(1).strip()
-        if clean_name_for_matching(addressed) != first_name:
-            return addressed, False
+    # 5. Direct 1-on-1 chat default
+    if is_direct_chat:
+        return user_name, True
 
-    # In 1-on-1 direct conversation or general request, default to the user
-    return user_name, True
+    # 6. If the sender is the user, task is assigned to the user
+    if sender_name and clean_name_for_matching(sender_name) == first_name:
+        return user_name, True
 
-# ── Priority & Title Helpers ──────────────────────────────────────────────────
+    # 7. In a group chat with no user mention and no team mention,
+    # the task is NOT assigned to the user!
+    return "Others", False
+
+
 def determine_priority(text: str, due_date: Optional[datetime], base_time: datetime, sender_name: str = "") -> str:
     """
     Computes task priority based on STRICT, DETERMINISTIC RULES:
@@ -337,12 +405,24 @@ def determine_priority(text: str, due_date: Optional[datetime], base_time: datet
     return "Medium" 
 
 
-def clean_task_title(verb: str, predicate: str) -> str:
-    """Strips deadline tails and formats clean task title."""
+def clean_task_title(verb: str, predicate: str, sender_name: str = "") -> str:
+    """Strips deadline tails and formats clean task title, resolving mentions and 1st-person pronouns."""
     DEADLINE_TAIL = r"\s+(?:by|before|due(?:\s+on)?|until|on|at|for)\s+(?:today|tonight|tomorrow|tmrw|yesterday|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{1,2}(?::\d{2})?\s*(?:am|pm)?|\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|[A-Za-z]+ \d{1,2}).*$"
     pred_cleaned = re.sub(DEADLINE_TAIL, "", predicate, flags=re.IGNORECASE).strip()
     pred_cleaned = re.sub(r"\s+(?:whenever(?:\s+you\s+have\s+time)?|if\s+possible|no\s+rush|without\s+fail|asap|urgently?).*$", "", pred_cleaned, flags=re.IGNORECASE).strip()
     pred_cleaned = pred_cleaned.rstrip(".,;!?")
+
+    # Clean WhatsApp mentions in title: @~Name -> Name, @Name -> Name
+    pred_cleaned = re.sub(r"@~?", "", pred_cleaned)
+
+    # Resolve first-person pronoun "me" to sender's recognizable name
+    if sender_name:
+        sender_disp = clean_display_name(sender_name)
+        if sender_disp and sender_disp.lower() not in ("you", "me"):
+            pred_cleaned = re.sub(r"\band\s+me\b", f"and {sender_disp}", pred_cleaned, flags=re.IGNORECASE)
+            pred_cleaned = re.sub(r"\b(?:to|with|for)\s+me\b", f"to {sender_disp}", pred_cleaned, flags=re.IGNORECASE)
+            pred_cleaned = re.sub(r"\bme\b", sender_disp, pred_cleaned, flags=re.IGNORECASE)
+
     return f"{verb.capitalize()} {pred_cleaned}".strip()
 
 
@@ -411,13 +491,14 @@ def extract_with_heuristics(messages: List[Dict]) -> List[Dict]:
                     verb = match.group(1).lower()
                     rest = match.group(2).strip()
 
-                    task_title = clean_task_title(verb, rest)
+                    task_title = clean_task_title(verb, rest, sender_name=sender_name)
                     if len(task_title) < 5:
                         continue
 
                     due_dt = resolve_due_date(sentence_clean, base_time=msg_time)
                     priority = determine_priority(sentence_clean, due_dt, base_time=msg_time, sender_name=sender_name)
-                    assigned_to, is_for_me = detect_assignee(sentence_clean, user_name=target_user)
+                    is_group = any(w in chat_name.lower() for w in ("group", "club", "members", "unofficial", "official", "team", "202", "class", "batch", "committee", "aerospace", "btech"))
+                    assigned_to, is_for_me = detect_assignee(sentence_clean, user_name=target_user, is_direct_chat=not is_group, sender_name=sender_name)
 
                     extracted_tasks.append({
                         "task_name": task_title,
@@ -455,12 +536,13 @@ The active user of this application is "{target_user}". Note: this user may be m
 
 Analyze the WhatsApp messages below and extract all genuine actionable tasks into a valid JSON array.
 
-TASK ASSIGNMENT RULES:
-- Determine who the task is for ("assigned_to"):
-  * If assigned to {target_user} (e.g. "@{target_user} please submit...", "{target_user} can you upload...", or direct directive to them): set "assigned_to": "{target_user}".
-  * If assigned to the whole group/everyone (e.g. "all teams submit by Friday", "everyone please review"): set "assigned_to": "Team / All".
-  * If assigned explicitly to another member (e.g. "@Eshanya please finish the UI", "Akmal do this"): set "assigned_to": "<Their Name>".
-- "is_assigned_to_user": boolean, true if assigned to {target_user} or "Team / All", false otherwise.
+CRITICAL ASSIGNEE RULES:
+- WhatsApp mentions use '@~Name', '@Name', or '@Phone' (e.g. '@~Tanishk', '@~Lakshyyy', '@Eshanya').
+- Directives: When a message addresses someone at the start (e.g. "@~Tanishk send...", "@Kanishk prepare...", "Eshanya, please finish..."), the task is assigned to THAT SPECIFIC PERSON (e.g. "Tanishk"), NOT to {target_user} and NOT to "Team / All".
+- First-person pronouns ("me", "my", "to me", "and me", "dm me", "send me"):
+  "me" refers STRICTLY to the SENDER of the message (e.g. if Cse Shreya Goyal writes "send to Lakshyyy and me", "me" means Shreya Goyal). It NEVER means {target_user} unless the sender is {target_user}.
+- "assigned_to": Set to the exact person responsible (e.g. "Tanishk", "{target_user}", "Eshanya", or "Team / All"). Clean any leading '@~' or '@'.
+- "is_assigned_to_user": Set to true ONLY if the task is assigned to {target_user} or "Team / All". If assigned to another person (e.g. "Tanishk"), MUST BE false!
 
 STRICT PRIORITY RULES:
 - "High": Hard deadline within <= 48 hours (e.g. today, tonight, tomorrow), explicit urgency ("urgent", "asap", "without fail", "mandatory", "portal closes"), or direct directive from a professor/evaluator.
@@ -470,8 +552,8 @@ STRICT PRIORITY RULES:
 OUTPUT SCHEMA:
 [
   {{
-    "task_name": "Concise imperative title starting with an action verb (e.g. 'Submit SDMS portal files')",
-    "assigned_to": "Name of person or 'Team / All'",
+    "task_name": "Concise imperative title starting with an action verb (e.g. 'Send today's attendance and photos to Lakshyyy and Shreya Goyal')",
+    "assigned_to": "Clean name of person (e.g. 'Tanishk') or 'Team / All'",
     "is_assigned_to_user": true or false,
     "due_date": "ISO-8601 string or null",
     "priority": "High" | "Medium" | "Low",
@@ -543,7 +625,12 @@ JSON Output:"""
         priority = p if p in ("High", "Medium", "Low") else "Medium"
 
         assigned_to = str(item.get("assigned_to", target_user)).strip() or target_user
+        assigned_to = re.sub(r"^@~?", "", assigned_to).strip()
         is_for_me = bool(item.get("is_assigned_to_user", True))
+        clean_assignee = clean_name_for_matching(assigned_to)
+        clean_user = clean_name_for_matching(target_user)
+        if clean_assignee not in (clean_user, "all", "everyone", "team", "team  all"):
+            is_for_me = False
 
         tasks.append({
             "task_name": name,
@@ -728,6 +815,8 @@ def upgrade_heuristic_tasks(session) -> Dict:
                 if best_item.get("priority"):
                     task.priority = best_item["priority"]
 
+                if best_item.get("assigned_to"):
+                    task.assigned_to = best_item["assigned_to"]
                 task.extraction_mode = "ollama"
                 upgraded_tasks.append(task)
         except Exception as e:

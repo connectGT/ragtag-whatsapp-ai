@@ -309,6 +309,45 @@ class TestDualModeExtractionContract(unittest.TestCase):
         if hasattr(Task, "extraction_mode"):
             self.assertEqual(upgraded_task.extraction_mode, "ollama")
 
+    @unittest.skipIf(task_extractor is None, "backend/task_extractor.py pending implementation in Milestone M1")
+    def test_whatsapp_mention_and_pronoun_assignee_attribution(self):
+        """Verify WhatsApp @~ pushname mentions and 1st-person pronouns are correctly attributed."""
+        msg = {
+            "id": "msg_tanishk_1",
+            "sender_name": "Cse Shreya Goyal✨ senior",
+            "chat_name": "Aerospace Members 2026",
+            "content": "@~Tanishk send today's attendance and photos to @~Lakshyyy and me",
+            "timestamp": datetime(2026, 10, 30, 10, 55),
+        }
+        tasks = task_extractor.extract_with_heuristics([msg])
+        self.assertEqual(len(tasks), 1)
+        task = tasks[0]
+        self.assertEqual(task["assigned_to"], "Tanishk")
+        self.assertFalse(task["is_assigned_to_user"], "Task addressed to Tanishk must not be assigned to user")
+        self.assertIn("Shreya Goyal", task["task_name"], "'and me' must be resolved to sender display name")
+
+    @unittest.skipIf(task_extractor is None, "backend/task_extractor.py pending implementation in Milestone M1")
+    def test_poll_and_celebration_idioms_not_extracted(self):
+        """Verify WhatsApp Polls and celebratory 'forward' idioms are not extracted as tasks."""
+        msgs = [
+            {
+                "id": "msg_poll",
+                "sender_name": "Cse Shreya Goyal",
+                "chat_name": "Aerospace Members 2026",
+                "content": "Poll: Are you going to be present on 24 october during hackathon.",
+                "timestamp": datetime(2026, 10, 20, 10, 0),
+            },
+            {
+                "id": "msg_anniv",
+                "sender_name": "Cse Shreya Goyal",
+                "chat_name": "Aerospace Members 2026",
+                "content": "Today marks 8 years of the club carried forward by the efforts of our seniors!",
+                "timestamp": datetime(2026, 10, 18, 10, 0),
+            },
+        ]
+        tasks = task_extractor.extract_with_heuristics(msgs)
+        self.assertEqual(len(tasks), 0, "Polls and idioms must not produce tasks")
+
 
 if __name__ == "__main__":
     unittest.main()
