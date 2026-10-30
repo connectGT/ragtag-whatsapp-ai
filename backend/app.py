@@ -195,16 +195,81 @@ def upload_chat_file():
 def chat_query():
     data = request.get_json(silent=True) or {}
     query = data.get("query", "").strip()
+    chat_name = data.get("chat_name")
     if not query:
         return jsonify({"error": "No query provided"}), 400
 
-    hits = search_chats(query, n_results=3)
+    settings = load_settings()
+    user_name = settings.get("user_name", "Guru")
+
+    hits = search_chats(query, n_results=4, chat_name=chat_name)
     if not hits:
+        target_info = f" in '{chat_name}'" if chat_name else ""
         return jsonify({
-            "text": "I searched the local ChromaDB vector store, but found no relevant messages matching your query.",
-            "sources": []
+            "text": f"I searched the local ChromaDB vector store{target_info}, but found no relevant messages matching '{query}'.",
+            "sources": [],
+            "action_items": []
         })
 
+    # If Ollama is available, synthesize an agentic answer
+    action_items = []
+    if get_ollama_online():
+        try:
+            import urllib.request
+            context_blocks = []
+            for h in hits:
+                context_blocks.append(f"[{h.get('timestamp')}] {h.get('sender_name')} ({h.get('chat_name')}): {h.get('snippet')}")
+            context_str = "\n".join(context_blocks)
+
+            prompt = f"""You are RAGTAG, an intelligent local assistant for WhatsApp.
+The active user is "{user_name}".
+Answer the user's question accurately using ONLY the provided WhatsApp message excerpts.
+If the excerpts mention any deadlines, tasks, or action items relevant to the question, state them clearly.
+
+User Question: {query}
+
+WhatsApp Excerpts:
+{context_str}
+
+Helpful Answer:"""
+
+            payload = {
+                "model": settings.get("ollama_model", "llama3:latest"),
+                "prompt": prompt,
+                "stream": False,
+                "options": {"temperature": 0.2}
+            }
+            req = urllib.request.Request(
+                "http://127.0.0.1:11434/api/generate",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"}
+            )
+            with urllib.request.urlopen(req, timeout=20.0) as resp:
+                res = json.loads(resp.read().decode("utf-8"))
+                response_text = res.get("response", "").strip()
+
+            # Attempt to extract action item for reminders if found in hits
+            for h in hits:
+                snippet = h.get("snippet", "")
+                if any(k in snippet.lower() for k in ("submit", "upload", "review", "due", "deadline", "by ", "before ")):
+                    action_items.append({
+                        "task_name": snippet[:80].strip(),
+                        "sender_name": h.get("sender_name", ""),
+                        "chat_name": h.get("chat_name", ""),
+                        "due_date": h.get("timestamp", ""),
+                        "context": snippet
+                    })
+                    break  # highlight top one
+
+            return jsonify({
+                "text": response_text,
+                "sources": hits,
+                "action_items": action_items
+            })
+        except Exception as err:
+            print(f"[Chat] Ollama synthesis warning: {err}")
+
+    # Fallback to direct semantic citation
     top_hit = hits[0]
     response_text = (
         f"Based on local semantic search in ChromaDB, here is the most relevant discussion found:\n\n"
@@ -215,7 +280,8 @@ def chat_query():
 
     return jsonify({
         "text": response_text,
-        "sources": hits
+        "sources": hits,
+        "action_items": action_items
     })
 
 @app.route('/api/tasks', methods=['GET'])
@@ -232,6 +298,7 @@ def get_tasks():
                 "due_date_iso": t.due_date.isoformat() if (t.due_date and isinstance(t.due_date, datetime)) else (str(t.due_date) if t.due_date else None),
                 "priority": t.priority,
                 "status": t.status.capitalize() if t.status else "Pending",
+                "assigned_to": getattr(t, "assigned_to", "Me") or "Me",
                 "extraction_mode": getattr(t, "extraction_mode", "heuristic") or "heuristic",
                 "context_message_id": t.context_message_id,
                 "context_message": None
@@ -368,14 +435,88 @@ def update_task(task_id):
 def get_chats():
     session = SessionLocal()
     try:
-        from sqlalchemy import func
-        results = (
-            session.query(Message.chat_name, func.count(Message.id))
-            .group_by(Message.chat_name)
+        from sqlalchemy import func, desc
+        # Retrieve all unique chat names
+        chat_names = [r[0] for r in session.query(Message.chat_name).distinct().all() if r[0]]
+        chats = []
+        for name in chat_names:
+            msg_count = session.query(Message).filter(Message.chat_name == name).count()
+            last_msg = (
+                session.query(Message)
+                .filter(Message.chat_name == name)
+                .order_by(desc(Message.timestamp))
+                .first()
+            )
+            # Distinct senders
+            senders_count = session.query(Message.sender_id).filter(Message.chat_name == name).distinct().count()
+
+            sender_name = "Unknown"
+            if last_msg:
+                contact = session.query(Contact).filter(Contact.id == last_msg.sender_id).first()
+                if contact:
+                    sender_name = contact.name
+
+            # Format relative time or time string
+            ts_str = ""
+            date_str = ""
+            if last_msg and last_msg.timestamp:
+                ts_str = last_msg.timestamp.strftime("%I:%M %p").lstrip("0")
+                date_str = last_msg.timestamp.strftime("%Y-%m-%d")
+
+            chats.append({
+                "chat_name": name,
+                "message_count": msg_count,
+                "is_group": senders_count > 2 or any(k in name.lower() for k in ("group", "club", "team", "cse", "office", "committee")),
+                "last_message": {
+                    "content": last_msg.content if last_msg else "",
+                    "timestamp": ts_str,
+                    "date": date_str,
+                    "sender_name": sender_name
+                } if last_msg else None
+            })
+
+        # Sort with most recent chat at the top
+        chats.sort(key=lambda c: (
+            c["last_message"]["date"] if c["last_message"] else "",
+            c["last_message"]["timestamp"] if c["last_message"] else ""
+        ), reverse=True)
+
+        return jsonify(chats)
+    finally:
+        session.close()
+
+
+@app.route('/api/chats/<path:chat_name>/messages', methods=['GET'])
+def get_chat_messages(chat_name):
+    """Return full chronological message stream for a specific WhatsApp chat/group."""
+    session = SessionLocal()
+    try:
+        from sqlalchemy import asc
+        msgs = (
+            session.query(Message)
+            .filter(Message.chat_name == chat_name)
+            .order_by(asc(Message.timestamp))
+            .limit(300)
             .all()
         )
-        chats = [{"chat_name": r[0], "message_count": r[1]} for r in results if r[0]]
-        return jsonify(chats)
+        results = []
+        for m in msgs:
+            contact = session.query(Contact).filter(Contact.id == m.sender_id).first()
+            sender_name = contact.name if contact else m.sender_id
+            results.append({
+                "id": m.id,
+                "sender_id": m.sender_id,
+                "sender_name": sender_name,
+                "content": m.content,
+                "timestamp": m.timestamp.strftime("%I:%M %p").lstrip("0") if m.timestamp else "",
+                "timestamp_raw": m.timestamp.isoformat() if m.timestamp else "",
+                "date": m.timestamp.strftime("%b %d, %Y") if m.timestamp else ""
+            })
+        return jsonify({
+            "chat_name": chat_name,
+            "count": len(results),
+            "messages": results
+        })
     finally:
         session.close()
 

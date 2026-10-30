@@ -13,7 +13,13 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
 
 from sqlalchemy import or_
+from sqlalchemy import or_
 from database import SessionLocal, Message, Task
+try:
+    from settings_manager import load_settings
+except ImportError:
+    def load_settings():
+        return {"user_name": "Guru"}
 
 # ── Configuration & Constants ──────────────────────────────────────────────────
 OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
@@ -221,37 +227,114 @@ def resolve_due_date(text: str, base_time: Optional[datetime] = None) -> Optiona
     return None
 
 
-# ── Priority & Title Helpers ──────────────────────────────────────────────────
-def determine_priority(text: str, due_date: Optional[datetime], base_time: datetime) -> str:
-    """Computes task priority: High, Medium, or Low."""
-    lower = text.lower()
 
-    # 1. High-priority triggers
+def clean_name_for_matching(name: str) -> str:
+    """Strip emojis, special symbols, and extra whitespace for fuzzy comparison."""
+    if not name:
+        return ""
+    # Remove emojis (unicode range) and symbols
+    clean = re.sub(r"[^\w\s]", "", name, flags=re.UNICODE)
+    return clean.strip().lower()
+
+
+def detect_assignee(text: str, user_name: str, is_direct_chat: bool = False) -> Tuple[str, bool]:
+    """
+    Detects who the task is directed at:
+    - Matches user by name/nickname (e.g. Guru, @guru, @Guru🔥, guru tiwari)
+    - Matches team mentions (all, everyone, team ragtag)
+    - Matches explicit other contacts (@Eshanya, Eshanya:, etc.)
+    Returns: (assigned_to: str, is_for_me: bool)
+    """
+    clean_target = clean_name_for_matching(user_name) or "guru"
+    target_tokens = clean_target.split()
+    first_name = target_tokens[0] if target_tokens else "guru"
+
+    # Regex pattern to match user mention with or without @ and tolerant to surrounding emojis/punctuation
+    # e.g. @guru, @Guru, @Guru✨, Guru:, Guru,
+    user_pattern = rf"(?:@\s*{re.escape(first_name)}|{re.escape(first_name)})"
+    has_user_mention = bool(re.search(user_pattern, text, re.IGNORECASE))
+
+    # Check for team / everyone mentions
+    team_pattern = r"(?:@all|@everyone|all\s+teams?|everyone|team\s+ragtag|team)"
+    has_team_mention = bool(re.search(team_pattern, text, re.IGNORECASE))
+
+    if has_user_mention:
+        return user_name, True
+    elif has_team_mention:
+        return "Team / All", True
+
+    # Check if another name is explicitly tagged at start or with @
+    other_mention = re.search(r"@([A-Za-z0-9_]+)", text)
+    if other_mention:
+        mentioned_tag = other_mention.group(1).strip()
+        if clean_name_for_matching(mentioned_tag) != first_name:
+            return mentioned_tag, False
+
+    # Check if someone else is addressed at the start e.g. "Eshanya, please finish..."
+    prefix_address = re.match(r"^([A-Z][a-z]+)[,:]\s+", text)
+    if prefix_address:
+        addressed = prefix_address.group(1).strip()
+        if clean_name_for_matching(addressed) != first_name:
+            return addressed, False
+
+    # In 1-on-1 direct conversation or general request, default to the user
+    return user_name, True
+
+# ── Priority & Title Helpers ──────────────────────────────────────────────────
+def determine_priority(text: str, due_date: Optional[datetime], base_time: datetime, sender_name: str = "") -> str:
+    """
+    Computes task priority based on STRICT, DETERMINISTIC RULES:
+    1. HIGH PRIORITY:
+       - Deadline within <= 48 hours of base_time (today, tonight, tomorrow, imminent).
+       - Explicit urgency keywords: urgent, asap, immediately, critical, without fail, mandatory, portal close.
+       - Direct directives from faculty/authority (prof, dr, sir, hod, evaluator).
+    2. LOW PRIORITY:
+       - Explicit flexibility: whenever, if possible, optional, no rush, take your time, fyi, consider.
+       - Far-off deadline (> 14 days).
+    3. MEDIUM PRIORITY:
+       - Standard project deliverables and action items with upcoming deadlines (> 2 days to 14 days).
+    """
+    lower = text.lower()
+    sender_lower = (sender_name or "").lower()
+
+    # 1. Explicit High-Priority Triggers
     high_keywords = [
-        r"\b(urgent|asap|immediately|critical|emergency|high priority|important|mandatory|strict)\b",
-        r"\b(without fail|final deadline|blocking)\b",
-        r"\b(tonight|today|by tonight|before tonight)\b",
-        r"\b(must|have to|required)\b",
+        r"\b(urgent|asap|immediately|critical|emergency|high priority|mandatory|strict|strictly)\b",
+        r"\b(without fail|final deadline|portal (?:closes|closing)|blocking|final call)\b",
+        r"\b(tonight|today|by tonight|before tonight|tomorrow morning)\b",
+        r"\b(must submit|must upload|compulsory|required)\b",
     ]
     for pat in high_keywords:
         if re.search(pat, lower):
             return "High"
 
-    # 2. Time-proximity heuristic: deadline within 24 hours of message
-    if due_date and (due_date - base_time).total_seconds() <= 86400:
-        return "High"
+    # Deadline within 48 hours is High Priority
+    if due_date:
+        diff_seconds = (due_date - base_time).total_seconds()
+        if 0 <= diff_seconds <= 172800:  # <= 48 hours
+            return "High"
 
-    # 3. Low-priority triggers
+    # Authority directive trigger
+    if any(title in sender_lower for title in ("prof", "dr.", "doctor", "hod", "sir", "masterji")):
+        if any(w in lower for w in ("submit", "upload", "deadline", "review", "slides", "final", "presentation")):
+            return "High"
+
+    # 2. Explicit Low-Priority Triggers
     low_keywords = [
         r"\b(whenever|low priority|if possible|optional|when you have time|no rush|fyi|take your time|eventually)\b",
-        r"\b(if you can|suggest|consider)\b",
+        r"\b(if you can|suggest|consider|just an idea|when free)\b",
     ]
     for pat in low_keywords:
         if re.search(pat, lower):
             return "Low"
 
-    # 4. Standard default
-    return "Medium"
+    if due_date:
+        diff_seconds = (due_date - base_time).total_seconds()
+        if diff_seconds > 14 * 86400:  # > 14 days away
+            return "Low"
+
+    # 3. Standard Default
+    return "Medium" 
 
 
 def clean_task_title(verb: str, predicate: str) -> str:
@@ -288,14 +371,28 @@ def extract_with_heuristics(messages: List[Dict]) -> List[Dict]:
     extracted_tasks = []
     verb_pattern = r"(?:" + "|".join(ACTION_VERBS) + r")\b"
 
+    user_settings = load_settings()
+    target_user = user_settings.get("user_name", "Guru")
+
+    # Filter out past-tense self reporting ("I have pushed", "I uploaded", "We finished", etc.)
+    SELF_REPORT_REGEX = re.compile(
+        r"^(?:i(?:'ve|\s+have|\s+already|\s+will)?\s+(?:pushed|uploaded|done|finished|submitted|sent|fixed|reviewed|checked|added)|we(?:'ve|\s+have|\s+already)?\s+(?:pushed|uploaded|done|finished|submitted|sent|fixed|reviewed|checked)|done\s+sir|completed|fixed\b)",
+        re.IGNORECASE
+    )
+
     for msg in messages:
         content = msg.get("content", "").strip()
         msg_id = msg.get("id")
+        sender_name = msg.get("sender_name", "")
+        chat_name = msg.get("chat_name", "")
         msg_time = msg.get("timestamp")
         if not isinstance(msg_time, datetime):
             msg_time = datetime.now()
 
         if not msg_id or is_non_actionable_message(content):
+            continue
+
+        if SELF_REPORT_REGEX.search(content.strip()):
             continue
 
         # Split sentences preserving technical dots (e.g. Next.js, schema.py)
@@ -319,12 +416,15 @@ def extract_with_heuristics(messages: List[Dict]) -> List[Dict]:
                         continue
 
                     due_dt = resolve_due_date(sentence_clean, base_time=msg_time)
-                    priority = determine_priority(sentence_clean, due_dt, base_time=msg_time)
+                    priority = determine_priority(sentence_clean, due_dt, base_time=msg_time, sender_name=sender_name)
+                    assigned_to, is_for_me = detect_assignee(sentence_clean, user_name=target_user)
 
                     extracted_tasks.append({
                         "task_name": task_title,
                         "due_date": due_dt,
                         "priority": priority,
+                        "assigned_to": assigned_to,
+                        "is_assigned_to_user": is_for_me,
                         "context_message_id": msg_id,
                         "extraction_mode": "heuristic"
                     })
@@ -347,17 +447,37 @@ def extract_with_ollama(messages: List[Dict]) -> List[Dict]:
     if not valid_msgs:
         return []
 
-    prompt = f"""You are RAGTAG Task Extractor, an intelligent WhatsApp task extraction AI.
-Analyze the provided WhatsApp messages and extract actionable deliverables and tasks into a valid JSON array.
+    user_settings = load_settings()
+    target_user = user_settings.get("user_name", "Guru")
 
-RULES:
-- If a message contains non-actionable chatter, greetings, or questions, return an empty array [].
-- "task_name": Concise title starting with an action verb (e.g. "Submit SDMS portal files").
-- "due_date": ISO-8601 string (e.g. "2026-09-25T17:00:00") resolved relative to message timestamp, or null if no deadline.
-- "priority": Exactly "High", "Medium", or "Low".
-- "context_message_id": The exact message id that originated the task.
+    prompt = f"""You are RAGTAG Task Extractor, an intelligent offline WhatsApp task intelligence engine.
+The active user of this application is "{target_user}". Note: this user may be mentioned in chats as "{target_user}", "@{target_user}", "@{target_user.lower()}", "{target_user.lower()}", with emojis (e.g. @{target_user}✨), or directly addressed in conversation.
 
-Output a valid JSON array of objects only.
+Analyze the WhatsApp messages below and extract all genuine actionable tasks into a valid JSON array.
+
+TASK ASSIGNMENT RULES:
+- Determine who the task is for ("assigned_to"):
+  * If assigned to {target_user} (e.g. "@{target_user} please submit...", "{target_user} can you upload...", or direct directive to them): set "assigned_to": "{target_user}".
+  * If assigned to the whole group/everyone (e.g. "all teams submit by Friday", "everyone please review"): set "assigned_to": "Team / All".
+  * If assigned explicitly to another member (e.g. "@Eshanya please finish the UI", "Akmal do this"): set "assigned_to": "<Their Name>".
+- "is_assigned_to_user": boolean, true if assigned to {target_user} or "Team / All", false otherwise.
+
+STRICT PRIORITY RULES:
+- "High": Hard deadline within <= 48 hours (e.g. today, tonight, tomorrow), explicit urgency ("urgent", "asap", "without fail", "mandatory", "portal closes"), or direct directive from a professor/evaluator.
+- "Medium": Standard project deliverables and reviews with upcoming deadlines (2 days to 14 days).
+- "Low": Flexible suggestions, "when you have time", "if possible", optional ideas, or distant deadlines (> 2 weeks).
+
+OUTPUT SCHEMA:
+[
+  {{
+    "task_name": "Concise imperative title starting with an action verb (e.g. 'Submit SDMS portal files')",
+    "assigned_to": "Name of person or 'Team / All'",
+    "is_assigned_to_user": true or false,
+    "due_date": "ISO-8601 string or null",
+    "priority": "High" | "Medium" | "Low",
+    "context_message_id": "exact message id string"
+  }}
+]
 
 Messages:
 {json.dumps(valid_msgs, indent=2)}
@@ -422,10 +542,15 @@ JSON Output:"""
         p = str(item.get("priority", "Medium")).strip().capitalize()
         priority = p if p in ("High", "Medium", "Low") else "Medium"
 
+        assigned_to = str(item.get("assigned_to", target_user)).strip() or target_user
+        is_for_me = bool(item.get("is_assigned_to_user", True))
+
         tasks.append({
             "task_name": name,
             "due_date": due_dt,
             "priority": priority,
+            "assigned_to": assigned_to,
+            "is_assigned_to_user": is_for_me,
             "context_message_id": cid,
             "extraction_mode": "ollama"
         })
@@ -500,6 +625,7 @@ def save_extracted_tasks(session, tasks_data: List[Dict]) -> Dict:
             due_date=td.get("due_date"),
             priority=td.get("priority", "Medium"),
             status="pending",
+            assigned_to=td.get("assigned_to", "Me"),
             context_message_id=cid,
             extraction_mode=td.get("extraction_mode", "heuristic")
         )
@@ -514,7 +640,8 @@ def save_extracted_tasks(session, tasks_data: List[Dict]) -> Dict:
             "priority": task_obj.priority,
             "status": task_obj.status,
             "context_message_id": task_obj.context_message_id,
-            "extraction_mode": task_obj.extraction_mode
+            "extraction_mode": task_obj.extraction_mode,
+            "assigned_to": task_obj.assigned_to
         })
         new_count += 1
 

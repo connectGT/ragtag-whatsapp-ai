@@ -18,6 +18,7 @@ export interface TaskCardProps {
   due_date: string;
   priority: "High" | "Medium" | "Low";
   status: "Pending" | "Approved" | "Dismissed";
+  assigned_to?: string;
   context_message: ContextMessage;
   onApprove?: (id: string) => void;
   onDismiss?: (id: string) => void;
@@ -70,6 +71,7 @@ export const TaskCard: React.FC<TaskCardProps> = ({
   due_date,
   priority,
   status,
+  assigned_to,
   context_message,
   onApprove,
   onDismiss,
@@ -126,6 +128,11 @@ export const TaskCard: React.FC<TaskCardProps> = ({
             >
               {currentStatus}
             </span>
+            {assigned_to && (
+              <span className="px-2.5 py-0.5 text-xs font-mono font-bold bg-amber-100 text-amber-900 border border-amber-400">
+                👤 {assigned_to}
+              </span>
+            )}
           </div>
           <span className="text-xs font-mono text-gray-600 bg-gray-100 px-2.5 py-1 border border-gray-300">
             {context_message.chat_name}

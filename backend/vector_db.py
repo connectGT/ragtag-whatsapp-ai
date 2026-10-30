@@ -166,21 +166,31 @@ def embed_and_store(collection: chromadb.Collection, chunks: List[Dict]) -> None
 
 # ── Step 6: Semantic Query Function (For Flask RAG API) ─────────────────────────
 
-def search_chats(query: str, n_results: int = 4) -> List[Dict]:
+def search_chats(query: str, n_results: int = 4, chat_name: Optional[str] = None) -> List[Dict]:
     """
     Search ChromaDB for the most relevant message chunks matching the query.
     Enriches results with contact names from SQLite for full traceability.
+    Supports optional chat_name scoping.
     """
     collection = init_chroma(reset=False)
     if collection.count() == 0:
         return []
 
     n = min(n_results, collection.count())
-    results = collection.query(
-        query_texts=[query],
-        n_results=n,
-        include=["documents", "metadatas", "distances"],
-    )
+    query_params = {
+        "query_texts": [query],
+        "n_results": n,
+        "include": ["documents", "metadatas", "distances"],
+    }
+    if chat_name and chat_name.strip() and chat_name.lower() not in ("all", "all chats", "all groups"):
+        query_params["where"] = {"chat_name": chat_name.strip()}
+
+    try:
+        results = collection.query(**query_params)
+    except Exception:
+        # If where filter has fewer items or fails, fallback to general search
+        query_params.pop("where", None)
+        results = collection.query(**query_params)
 
     db = SessionLocal()
     hits = []

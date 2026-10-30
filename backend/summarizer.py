@@ -154,6 +154,8 @@ def heuristic_timeline_summary(
         "timeline": f"{start_time} - {end_time}",
         "participants": participants,
         "tldr": tldr,
+        "summary": tldr,
+        "summary_text": tldr,
         "decisions": decisions[:5],
         "actions": actions[:5],
         "mentions_for_user": mentions_for_user,
@@ -300,6 +302,8 @@ def generate_timeline_summary(
                     "timeline": f"{messages[0]['timestamp'].strftime('%b %d, %H:%M')} - {messages[-1]['timestamp'].strftime('%b %d, %H:%M')}",
                     "participants": list({m['sender_name'] for m in messages}),
                     "briefing_markdown": llm_response,
+                    "summary": llm_response,
+                    "summary_text": llm_response,
                     "generated_by": "ollama_llama3_local",
                 }
             except Exception as e:

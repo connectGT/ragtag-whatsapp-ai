@@ -49,7 +49,7 @@ export const DashboardView: React.FC = () => {
     fetchTasks();
   }, [fetchTasks]);
 
-  const [activeTab, setActiveTab] = useState<"All" | "Pending" | "Approved" | "Dismissed">("All");
+  const [activeTab, setActiveTab] = useState<"Assigned to Me" | "All" | "Pending" | "Approved" | "Dismissed">("Assigned to Me");
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedContextMsg, setSelectedContextMsg] = useState<ContextMessage | null>(null);
 
@@ -126,16 +126,27 @@ export const DashboardView: React.FC = () => {
     );
   };
 
+  const isTaskForMe = (t: TaskCardProps) => {
+    const a = (t.assigned_to || "").toLowerCase();
+    return a.includes("guru") || a.includes("me") || a.includes("all") || a.includes("team") || !t.assigned_to;
+  };
+
   const filteredTasks = tasks.filter((t) => {
-    const matchesTab =
-      activeTab === "All" ||
-      (t.status || "").toLowerCase() === activeTab.toLowerCase();
+    let matchesTab = true;
+    if (activeTab === "Assigned to Me") {
+      matchesTab = isTaskForMe(t);
+    } else if (activeTab !== "All") {
+      matchesTab = (t.status || "").toLowerCase() === activeTab.toLowerCase();
+    }
+
     const chatName = t.context_message?.chat_name || "";
     const senderName = t.context_message?.sender_name || "";
+    const assigned = t.assigned_to || "";
     const matchesSearch =
       t.task_name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       chatName.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      senderName.toLowerCase().includes(searchQuery.toLowerCase());
+      senderName.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      assigned.toLowerCase().includes(searchQuery.toLowerCase());
     return matchesTab && matchesSearch;
   });
 
@@ -277,10 +288,12 @@ export const DashboardView: React.FC = () => {
         {/* Filter Tabs & Search Bar */}
         <div className="flex flex-col sm:flex-row items-center justify-between gap-4 pt-1">
           <div className="flex items-center gap-2 w-full sm:w-auto flex-wrap">
-            {(["All", "Pending", "Approved", "Dismissed"] as const).map((tab) => {
+            {(["Assigned to Me", "All", "Pending", "Approved", "Dismissed"] as const).map((tab) => {
               const count =
                 tab === "All"
                   ? tasks.length
+                  : tab === "Assigned to Me"
+                  ? tasks.filter(isTaskForMe).length
                   : tasks.filter(
                       (t) => (t.status || "").toLowerCase() === tab.toLowerCase()
                     ).length;

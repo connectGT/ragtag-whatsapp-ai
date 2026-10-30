@@ -112,6 +112,9 @@ class Task(Base):
     extraction_mode: Mapped[str] = mapped_column(
         String, default="heuristic", server_default="heuristic", nullable=False
     )
+    assigned_to: Mapped[Optional[str]] = mapped_column(
+        String, default="Me", server_default="Me", nullable=True
+    )
     context_message_id: Mapped[str] = mapped_column(
         String, ForeignKey("messages.id"), nullable=False
     )
@@ -141,6 +144,12 @@ def init_db():
                 text("ALTER TABLE tasks ADD COLUMN extraction_mode VARCHAR NOT NULL DEFAULT 'heuristic'")
             )
             print("[Database] Schema upgraded: added 'extraction_mode' column to 'tasks' table.")
+
+        if col_names and "assigned_to" not in col_names:
+            conn.execute(
+                text("ALTER TABLE tasks ADD COLUMN assigned_to VARCHAR DEFAULT 'Me'")
+            )
+            print("[Database] Schema upgraded: added 'assigned_to' column to 'tasks' table.")
 
     print("Database tables initialized successfully in 'msgstore_ragtag.db'.")
 
