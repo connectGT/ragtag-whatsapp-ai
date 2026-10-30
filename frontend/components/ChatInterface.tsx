@@ -151,6 +151,27 @@ export const ChatInterface: React.FC = () => {
   // Active view toggle: 'messages' (WhatsApp stream) vs 'agent' (AI analysis / catchup)
   const [viewMode, setViewMode] = useState<"messages" | "agent">("messages");
 
+  // Target message deep link navigation & highlight
+  const [targetMsgIdToScroll, setTargetMsgIdToScroll] = useState<string | null>(null);
+  const [highlightedMsgId, setHighlightedMsgId] = useState<string | null>(null);
+
+  // Read URL query parameters (?chat=...&msgId=...) on load
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      const chatParam = params.get("chat");
+      const msgParam = params.get("msgId");
+
+      if (chatParam) {
+        setSelectedChat(chatParam);
+      }
+      if (msgParam) {
+        setTargetMsgIdToScroll(msgParam);
+        setViewMode("messages");
+      }
+    }
+  }, []);
+
   // AI responses & query state
   const [agentResponses, setAgentResponses] = useState<AgentResponse[]>([]);
   const [inputQuery, setInputQuery] = useState("");
@@ -214,12 +235,27 @@ export const ChatInterface: React.FC = () => {
       .finally(() => setLoadingMessages(false));
   }, [selectedChat]);
 
-  // Scroll to bottom of message list
+  // Scroll to target message or scroll to bottom
   useEffect(() => {
     if (viewMode === "messages") {
-      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      if (targetMsgIdToScroll && !loadingMessages && messages.length > 0) {
+        const timer = setTimeout(() => {
+          const el = document.getElementById(`msg-${targetMsgIdToScroll}`);
+          if (el) {
+            el.scrollIntoView({ behavior: "smooth", block: "center" });
+            setHighlightedMsgId(targetMsgIdToScroll);
+            const clearTimer = setTimeout(() => {
+              setHighlightedMsgId(null);
+            }, 5000);
+            return () => clearTimeout(clearTimer);
+          }
+        }, 200);
+        return () => clearTimeout(timer);
+      } else if (!targetMsgIdToScroll && !loadingMessages && messages.length > 0) {
+        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      }
     }
-  }, [messages, viewMode]);
+  }, [messages, viewMode, targetMsgIdToScroll, loadingMessages]);
 
   // Trigger Catch-Me-Up briefing for selected chat
   const handleTriggerCatchup = async () => {
@@ -572,18 +608,32 @@ export const ChatInterface: React.FC = () => {
               <div className="space-y-3 max-w-3xl mx-auto">
                 {messages.map((m) => {
                   const actionable = isMessageActionable(m.content);
+                  const isHighlighted = highlightedMsgId === m.id;
                   return (
                     <div
                       key={m.id}
-                      className={`flex flex-col ${m.is_me ? "items-end" : "items-start"}`}
+                      id={`msg-${m.id}`}
+                      className={`flex flex-col transition-all duration-300 ${
+                        m.is_me ? "items-end" : "items-start"
+                      }`}
                     >
                       <div
-                        className={`max-w-[85%] md:max-w-[70%] p-3.5 rounded-lg shadow-xs border ${
-                          m.is_me
+                        className={`max-w-[85%] md:max-w-[70%] p-3.5 rounded-lg shadow-xs border transition-all duration-300 ${
+                          isHighlighted
+                            ? "bg-amber-50 border-2 border-amber-600 ring-4 ring-amber-400/50 shadow-md scale-[1.01]"
+                            : m.is_me
                             ? "bg-[#dcf8c6] border-[#c0e8a7] text-gray-900 rounded-tr-none"
                             : "bg-white border-gray-200 text-gray-900 rounded-tl-none"
                         }`}
                       >
+                        {/* Target Highlight Badge */}
+                        {isHighlighted && (
+                          <div className="flex items-center gap-1.5 text-[10px] font-black uppercase tracking-wider text-amber-900 bg-amber-200 px-2 py-0.5 rounded-xs mb-2 border border-amber-400 w-fit">
+                            <Sparkles className="w-3 h-3 text-amber-900" />
+                            <span>Target Context Message</span>
+                          </div>
+                        )}
+
                         {/* Sender Name in group chat */}
                         {!m.is_me && (
                           <div className="text-[11px] font-bold text-teal-800 mb-1 font-sans">

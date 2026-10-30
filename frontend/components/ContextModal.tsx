@@ -1,7 +1,7 @@
 "use client";
 
 import React from "react";
-import { X, Database, ShieldCheck } from "lucide-react";
+import { X, Database, ShieldCheck, ExternalLink, MessageSquare } from "lucide-react";
 import { ContextMessage } from "./TaskCard";
 
 interface ContextModalProps {
@@ -75,7 +75,14 @@ export const ContextModal: React.FC<ContextModalProps> = ({ message, onClose }) 
           </div>
         </div>
 
-        <div className="px-6 py-3.5 bg-gray-100 border-t border-gray-300 flex justify-end">
+        <div className="px-6 py-3.5 bg-gray-100 border-t border-gray-300 flex items-center justify-between gap-3">
+          <a
+            href={`/chat?chat=${encodeURIComponent(message.chat_name)}&msgId=${encodeURIComponent(message.id)}`}
+            className="flex items-center gap-2 px-4 py-2 text-xs font-bold uppercase tracking-wider bg-yellow-400 hover:bg-yellow-500 text-black border border-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] transition-colors"
+          >
+            <ExternalLink className="w-3.5 h-3.5" />
+            <span>Open in Agentic Panel</span>
+          </a>
           <button
             onClick={onClose}
             className="px-5 py-2 text-xs font-bold uppercase tracking-wider bg-black text-white hover:bg-gray-800 transition-colors cursor-pointer"

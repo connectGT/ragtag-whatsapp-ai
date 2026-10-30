@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
-import { Clock, User, CalendarPlus, CheckCircle2, XCircle, MessageSquareCode } from "lucide-react";
+import { Clock, User, CalendarPlus, CheckCircle2, XCircle, MessageSquareCode, ExternalLink, MessageSquare } from "lucide-react";
 
 export interface ContextMessage {
   id: string;
@@ -160,13 +160,25 @@ export const TaskCard: React.FC<TaskCardProps> = ({
       </div>
 
       <div className="flex items-center justify-between gap-3 flex-wrap pt-2">
-        <button
-          onClick={() => onViewContext && onViewContext(context_message)}
-          className="flex items-center gap-2 px-3.5 py-2 text-xs font-bold text-gray-900 bg-white hover:bg-gray-100 border border-gray-300 hover:border-gray-400 transition-all duration-200 cursor-pointer"
-        >
-          <MessageSquareCode className="w-4 h-4 text-black" />
-          <span>View Context</span>
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => onViewContext && onViewContext(context_message)}
+            className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold text-gray-900 bg-white hover:bg-gray-100 border border-gray-300 hover:border-gray-400 transition-all duration-200 cursor-pointer"
+            title="Inspect relational database ground-truth trace"
+          >
+            <MessageSquareCode className="w-3.5 h-3.5 text-black" />
+            <span>Trace</span>
+          </button>
+
+          <a
+            href={`/chat?chat=${encodeURIComponent(context_message.chat_name)}&msgId=${encodeURIComponent(context_message.id)}`}
+            className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold text-black bg-yellow-300 hover:bg-yellow-400 border border-black transition-all duration-200 shadow-[1.5px_1.5px_0px_0px_rgba(0,0,0,1)] active:translate-x-[0.5px] active:translate-y-[0.5px]"
+            title="Jump directly to this message in the Agentic Chat panel"
+          >
+            <ExternalLink className="w-3.5 h-3.5 text-black" />
+            <span>Open in Chat</span>
+          </a>
+        </div>
 
         <div className="flex items-center gap-2">
           {currentStatus !== "Dismissed" && (
