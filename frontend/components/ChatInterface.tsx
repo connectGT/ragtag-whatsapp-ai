@@ -70,9 +70,9 @@ export const ChatInterface: React.FC = () => {
   }, []);
 
   const sampleQueries = [
-    "What tasks are due this Friday?",
-    "Summarize project discussions with Prof. Sharma",
-    "Did anyone ask about SDMS portal files?",
+    "What tasks are due this week?",
+    "Summarize our latest project discussions",
+    "What action items are currently pending?",
   ];
 
   const handleSend = async (textToSend?: string) => {

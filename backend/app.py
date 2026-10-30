@@ -401,6 +401,7 @@ def handle_settings():
         return jsonify(settings), 200
 
 
+@app.route('/api/messages/inject', methods=['POST'])
 @app.route('/api/simulation/inject', methods=['POST'])
 def inject_simulation_message():
     """
@@ -417,8 +418,8 @@ def inject_simulation_message():
             "message": "Message content cannot be empty."
         }), 400
 
-    sender_name = (data.get("sender_name") or "Faculty Evaluator").strip()
-    chat_name = (data.get("chat_name") or "Faculty Simulation").strip()
+    sender_name = (data.get("sender_name") or "Contact").strip()
+    chat_name = (data.get("chat_name") or "WhatsApp Group").strip()
     raw_ts = data.get("timestamp")
     mode = data.get("mode", "auto")
     if mode not in ("auto", "ollama", "heuristic"):
