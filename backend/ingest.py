@@ -6,7 +6,8 @@ and triggers downstream vector indexing (ChromaDB).
 
 Supported Sources:
   1. Decrypted WhatsApp SQLite database (msgstore.db from decrypt_pipeline.py)
-  2. Exported WhatsApp chat logs (.txt exports from Android / iOS)
+  2. Exported WhatsApp chat logs (.txt exports from Android / iOS / WhatsApp Desktop)
+  3. Compressed ZIP exports from WhatsApp Desktop (contains _chat.txt inside)
 
 Workflow:
   Raw Source ──► Ingestion & Cleaning ──► SQLite (Contacts & Messages) ──► ChromaDB Vector Index
@@ -18,6 +19,8 @@ import os
 import re
 import sqlite3
 import uuid
+import zipfile
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple, List, Dict
@@ -52,6 +55,46 @@ def is_system_message(text: str) -> bool:
         if re.search(pattern, text, re.IGNORECASE):
             return True
     return False
+
+
+# ── Step 1b: ZIP Export Extraction ────────────────────────────────────────────
+
+def extract_txt_from_zip(zip_path: str) -> str:
+    """
+    Extract the _chat.txt file from a WhatsApp Desktop ZIP export.
+    WhatsApp Desktop exports a .zip containing '_chat.txt' plus any media files.
+
+    Returns the path to a temporary .txt file (caller should NOT delete it;
+    it lives in a temp dir that gets cleaned up by the OS eventually).
+    Raises ValueError if no .txt chat file is found inside the ZIP.
+    """
+    zip_path = str(zip_path)
+    print(f"[Ingest] ZIP detected: {zip_path}")
+
+    with zipfile.ZipFile(zip_path, 'r') as zf:
+        # Find the chat txt — WhatsApp names it '_chat.txt' or '<GroupName>.txt'
+        txt_entries = [
+            name for name in zf.namelist()
+            if name.endswith('.txt') and not name.startswith('__MACOSX')
+        ]
+        if not txt_entries:
+            raise ValueError(
+                f"No .txt file found inside ZIP '{zip_path}'. "
+                "Make sure you exported 'Without Media' or the full ZIP."
+            )
+
+        # Prefer '_chat.txt' (standard WhatsApp Desktop name), else first .txt
+        chat_entry = next((n for n in txt_entries if '_chat' in n.lower()), txt_entries[0])
+        print(f"[Ingest] Extracting '{chat_entry}' from ZIP...")
+
+        # Write to a temp file so parse_exported_txt can open it normally
+        tmp_dir = tempfile.mkdtemp(prefix="ragtag_zip_")
+        extracted_path = os.path.join(tmp_dir, os.path.basename(chat_entry))
+        with zf.open(chat_entry) as src, open(extracted_path, 'wb') as dst:
+            dst.write(src.read())
+
+        print(f"[Ingest] Extracted to temp: {extracted_path}")
+        return extracted_path
 
 
 # ── Step 2: Decrypted msgstore.db Ingestion ────────────────────────────────────
@@ -303,7 +346,7 @@ def run_ingestion(source_path: Optional[str] = None, sync_vectors: bool = True) 
 
     target = source_path
     if not target:
-        # Default lookups in backups/
+        # Default lookups in backups/ -- priority: msgstore.db > .txt > .zip
         decrypted_db = BACKEND_DIR / "msgstore.db"
         if decrypted_db.exists():
             target = str(decrypted_db)
@@ -311,21 +354,35 @@ def run_ingestion(source_path: Optional[str] = None, sync_vectors: bool = True) 
             txt_files = list(BACKUP_DIR.glob("*.txt"))
             if txt_files:
                 target = str(txt_files[0])
+            else:
+                zip_files = list(BACKUP_DIR.glob("*.zip"))
+                if zip_files:
+                    target = str(zip_files[0])
 
     if not target or not os.path.exists(target):
         return {
             "status": "error",
-            "message": f"No source found. Place msgstore.db or a .txt chat in '{BACKUP_DIR}'.",
+            "message": (
+                "No source found. Place a WhatsApp export (.txt or .zip) "
+                f"or decrypted msgstore.db in '{BACKUP_DIR}'."
+            ),
         }
 
     print(f"[Pipeline] Source identified: {target}")
+
+    # Resolve ZIP -> extract inner _chat.txt first
+    if target.endswith(".zip"):
+        try:
+            target = extract_txt_from_zip(target)
+        except (zipfile.BadZipFile, ValueError) as e:
+            return {"status": "error", "message": f"ZIP extraction failed: {e}"}
 
     if target.endswith(".db"):
         messages = parse_decrypted_msgstore(target)
     elif target.endswith(".txt"):
         messages = parse_exported_txt(target)
     else:
-        return {"status": "error", "message": "Unsupported file format. Use .db or .txt"}
+        return {"status": "error", "message": "Unsupported file format. Use .db, .txt, or .zip"}
 
     if not messages:
         return {"status": "warning", "message": "No valid messages found in source."}

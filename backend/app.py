@@ -156,6 +156,41 @@ def trigger_ingest():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
+
+@app.route('/api/upload', methods=['POST'])
+def upload_chat_file():
+    """
+    Accept a direct file upload (.txt or .zip) from the frontend,
+    save it to backups/, then immediately run ingestion on it.
+    Supports WhatsApp Desktop ZIP exports and plain .txt exports.
+    """
+    if 'file' not in request.files:
+        return jsonify({"status": "error", "message": "No file part in request."}), 400
+
+    uploaded = request.files['file']
+    if not uploaded.filename:
+        return jsonify({"status": "error", "message": "No file selected."}), 400
+
+    filename = uploaded.filename
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in ('.txt', '.zip', '.db'):
+        return jsonify({
+            "status": "error",
+            "message": f"Unsupported file type '{ext}'. Upload a .txt, .zip, or .db file."
+        }), 400
+
+    save_path = os.path.join(BACKUP_DIR, filename)
+    uploaded.save(save_path)
+    print(f"[API] Uploaded '{filename}' saved to {save_path}")
+
+    try:
+        result = run_ingestion(source_path=save_path)
+        result["uploaded_file"] = filename
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.route('/api/chat', methods=['POST'])
 def chat_query():
     data = request.get_json(silent=True) or {}

@@ -297,7 +297,7 @@ export default function SyncPage() {
   // Direct WhatsApp Group Chat Transcript / File Import
   const handleParseAndImportTranscript = async () => {
     if (!rawTranscript.trim()) {
-      alert("Please paste WhatsApp chat transcript or upload a .txt file.");
+      alert("Please paste WhatsApp chat transcript or upload a .txt / .zip file.");
       return;
     }
 
@@ -393,15 +393,37 @@ export default function SyncPage() {
   };
 
   // File upload reader for .txt WhatsApp exports
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (!file.name.endsWith(".txt")) {
-      alert("Please upload a .txt exported WhatsApp chat file.");
+    const isZip = file.name.toLowerCase().endsWith(".zip");
+    const isTxt = file.name.toLowerCase().endsWith(".txt");
+    if (!isTxt && !isZip) {
+      alert("Please upload a WhatsApp export file (.txt or .zip from WhatsApp Desktop).");
       return;
     }
 
+    if (isZip) {
+      // ZIP files: send directly to backend /api/upload — backend extracts _chat.txt
+      appendLog(`ZIP detected: "${file.name}" (${(file.size / 1024).toFixed(1)} KB). Uploading to backend...`, "INFO");
+      const formData = new FormData();
+      formData.append("file", file);
+      try {
+        const res = await fetch("http://localhost:5000/api/upload", { method: "POST", body: formData });
+        const data = await res.json();
+        if (data.status === "success") {
+          appendLog(`ZIP ingested: ${data.messages_added} messages, ${data.tasks_extracted} tasks extracted.`, "SUCCESS");
+        } else {
+          appendLog(`ZIP ingestion error: ${data.message}`, "ERROR");
+        }
+      } catch (err) {
+        appendLog(`Upload failed: ${err}`, "ERROR");
+      }
+      return;
+    }
+
+    // .txt file: read locally and set transcript for manual import
     const reader = new FileReader();
     reader.onload = (event) => {
       const text = event.target?.result as string;
@@ -805,8 +827,8 @@ export default function SyncPage() {
           <div className="flex items-center gap-2">
             <label className="px-3 py-1.5 bg-gray-100 hover:bg-gray-200 text-black border border-black text-xs font-mono font-bold cursor-pointer flex items-center gap-1.5">
               <Upload className="w-3.5 h-3.5" />
-              <span>Choose .txt File</span>
-              <input type="file" accept=".txt" onChange={handleFileUpload} className="hidden" />
+              <span>Choose .txt or .zip</span>
+              <input type="file" accept=".txt,.zip" onChange={handleFileUpload} className="hidden" />
             </label>
           </div>
         </div>
