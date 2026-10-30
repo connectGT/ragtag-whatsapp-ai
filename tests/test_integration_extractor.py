@@ -349,5 +349,73 @@ class TestDualModeExtractionContract(unittest.TestCase):
         self.assertEqual(len(tasks), 0, "Polls and idioms must not produce tasks")
 
 
+    @unittest.skipIf(task_extractor is None, "backend/task_extractor.py pending implementation in Milestone M1")
+    def test_conversational_thread_above_below_assignee_attribution(self):
+        """Verify conversational thread (above & below messages) resolves untagged directives to the conversational partner."""
+        thread_msgs = [
+            {
+                "id": "msg_mahima_1",
+                "sender_name": "Cse Mahima Sutrakar Mits",
+                "chat_name": "Aerospace Club 2026",
+                "content": "@~Lakshyyy DM me for Brainstorming Session Report format!",
+                "timestamp": datetime(2026, 10, 30, 11, 10),
+            },
+            {
+                "id": "msg_lakshyyy_1",
+                "sender_name": "+91 75808 94643",
+                "chat_name": "Aerospace Club 2026",
+                "content": "Mam I already have the format",
+                "timestamp": datetime(2026, 10, 30, 11, 10, 30),
+            },
+            {
+                "id": "msg_mahima_2",
+                "sender_name": "Cse Mahima Sutrakar Mits",
+                "chat_name": "Aerospace Club 2026",
+                "content": "Okay then send me the report ASAP!!!",
+                "timestamp": datetime(2026, 10, 30, 11, 11),
+            },
+            {
+                "id": "msg_lakshyyy_2",
+                "sender_name": "+91 75808 94643",
+                "chat_name": "Aerospace Club 2026",
+                "content": "Sure mam",
+                "timestamp": datetime(2026, 10, 30, 11, 11, 15),
+            }
+        ]
+        tasks = task_extractor.extract_with_heuristics(thread_msgs)
+        # Find task generated for msg_mahima_2 ("Okay then send me the report ASAP!!!")
+        mahima_tasks = [t for t in tasks if t["context_message_id"] == "msg_mahima_2"]
+        self.assertEqual(len(mahima_tasks), 1)
+        task = mahima_tasks[0]
+        self.assertEqual(task["assigned_to"], "Lakshyyy", "Task must be attributed to conversational partner Lakshyyy")
+        self.assertFalse(task["is_assigned_to_user"], "Task directed at Lakshyyy must not be assigned to user")
+
+    @unittest.skipIf(task_extractor is None, "backend/task_extractor.py pending implementation in Milestone M1")
+    def test_followup_directive_in_burst_inherits_tagged_assignee(self):
+        """Verify untagged follow-up directive from same sender inherits the assignee tagged in the burst."""
+        burst_msgs = [
+            {
+                "id": "msg_shreya_1",
+                "sender_name": "Cse Shreya Goyal✨ senior",
+                "chat_name": "Aerospace Club 2026",
+                "content": "@~Tanishk send today's attendance and photos to @~Lakshyyy and me",
+                "timestamp": datetime(2026, 10, 30, 10, 55),
+            },
+            {
+                "id": "msg_shreya_2",
+                "sender_name": "Cse Shreya Goyal✨ senior",
+                "chat_name": "Aerospace Club 2026",
+                "content": "Write branch and year also.. and check spellings",
+                "timestamp": datetime(2026, 10, 30, 10, 56),
+            }
+        ]
+        tasks = task_extractor.extract_with_heuristics(burst_msgs)
+        shreya_tasks = [t for t in tasks if t["context_message_id"] == "msg_shreya_2"]
+        self.assertGreaterEqual(len(shreya_tasks), 1)
+        for task in shreya_tasks:
+            self.assertEqual(task["assigned_to"], "Tanishk", "Follow-up directive must inherit Tanishk as assignee")
+            self.assertFalse(task["is_assigned_to_user"], "Task directed at Tanishk must not be assigned to user")
+
+
 if __name__ == "__main__":
     unittest.main()

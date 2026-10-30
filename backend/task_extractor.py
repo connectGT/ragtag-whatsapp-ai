@@ -289,14 +289,16 @@ def detect_assignee(
     text: str,
     user_name: str,
     is_direct_chat: bool = False,
-    sender_name: str = ""
+    sender_name: str = "",
+    messages: Optional[List[Dict]] = None,
+    current_idx: Optional[int] = None,
+    chat_name: str = ""
 ) -> Tuple[str, bool]:
     """
-    Detects who the task is directed at:
-    - Matches user by name/nickname (e.g. Guru, @guru, @Guru, @~Guru, guru)
-    - Matches team mentions (all, everyone, team ragtag, all teams)
-    - Matches explicit other contacts (@~Tanishk, @Eshanya, Eshanya:, etc.)
-    - Understands that "me" / "to me" refers to sender_name, NOT to user_name (unless sender is user_name).
+    Detects who the task is directed at by combining:
+    1. In-message vocatives & tags (@~Tanishk, @Guru, @all, Eshanya:)
+    2. Conversational thread context (preceding/succeeding messages above & below)
+    3. User identity matching ("is it me?")
     Returns: (assigned_to: str, is_for_me: bool)
     """
     clean_target = clean_name_for_matching(user_name) or "guru"
@@ -320,7 +322,7 @@ def detect_assignee(
         return user_name, True
 
     # 3. Check for team / everyone mentions anywhere
-    team_pattern = r"(?:@\\??all\\??|@everyone|\ball\s+teams?\b|\beveryone\b|\bteam\s+ragtag\b|\bteam\b)"
+    team_pattern = r"(?:@\??all\??|@everyone|\ball\s+teams?\b|\beveryone\b|\bteam\s+ragtag\b|\bteam\b)"
     if re.search(team_pattern, text, re.IGNORECASE):
         return "Team / All", True
 
@@ -336,15 +338,86 @@ def detect_assignee(
         else:
             return clean_display_name(mentioned_tag), False
 
-    # 5. Direct 1-on-1 chat default
+    # 5. CONVERSATIONAL THREAD CONTEXT ANALYSIS (ABOVE & BELOW)
+    # If the message does not have an explicit tag, check who the sender was in dialogue with
+    if messages is not None and current_idx is not None and 0 <= current_idx < len(messages):
+        curr_msg = messages[current_idx]
+        msg_time = curr_msg.get("timestamp")
+        target_chat = chat_name or curr_msg.get("chat_name", "")
+
+        # A. Check preceding messages (above) in the same chat within 20 minutes
+        prev_partner = None
+        for j in range(current_idx - 1, max(-1, current_idx - 6), -1):
+            prev_msg = messages[j]
+            if prev_msg.get("chat_name") != target_chat:
+                continue
+            prev_time = prev_msg.get("timestamp")
+            if isinstance(prev_time, datetime) and isinstance(msg_time, datetime):
+                if (msg_time - prev_time).total_seconds() > 1200:  # > 20 min gap
+                    break
+
+            prev_sender = prev_msg.get("sender_name", "")
+            prev_content = prev_msg.get("content", "")
+
+            # If the same sender tagged someone earlier in this conversation burst
+            # e.g. "@~Tanishk attendance??" followed by "Write branch and year also.. and check spellings"
+            if clean_name_for_matching(prev_sender) == clean_name_for_matching(sender_name):
+                prev_tag = extract_leading_tag(prev_content) or (
+                    re.search(r"@~?([A-Za-z0-9_]+)", prev_content).group(1)
+                    if re.search(r"@~?([A-Za-z0-9_]+)", prev_content) else None
+                )
+                if prev_tag and clean_name_for_matching(prev_tag) not in ("all", "everyone", "team"):
+                    prev_partner = clean_display_name(prev_tag)
+                    break
+            else:
+                # A different sender spoke immediately before (conversational turn)
+                # e.g. "+91 75808 94643: Mam I already have the format" -> "Okay then send me the report ASAP!!!"
+                if not prev_partner:
+                    prev_partner = clean_display_name(prev_sender)
+                    # Check if that contact had been tagged by name in recent messages
+                    for k in range(j - 1, max(-1, j - 4), -1):
+                        anc_msg = messages[k]
+                        if anc_msg.get("chat_name") == target_chat:
+                            anc_tag = re.search(r"@~?([A-Za-z0-9_]+)", anc_msg.get("content", ""))
+                            if anc_tag and anc_tag.group(1).lower() not in ("all", "everyone", "team"):
+                                prev_partner = clean_display_name(anc_tag.group(1))
+                                break
+                    break
+
+        # B. Check succeeding messages (below) in the same chat within 5 minutes for acknowledgment
+        next_partner = None
+        for j in range(current_idx + 1, min(len(messages), current_idx + 4)):
+            nxt_msg = messages[j]
+            if nxt_msg.get("chat_name") != target_chat:
+                continue
+            nxt_time = nxt_msg.get("timestamp")
+            if isinstance(nxt_time, datetime) and isinstance(msg_time, datetime):
+                if (nxt_time - msg_time).total_seconds() > 300:  # > 5 min
+                    break
+            nxt_content = nxt_msg.get("content", "").lower()
+            if re.search(r"^(?:sure|ok|okay|will do|yes|done|on it)\b", nxt_content):
+                next_partner = clean_display_name(nxt_msg.get("sender_name", ""))
+                break
+
+        thread_candidate = prev_partner or next_partner
+        if thread_candidate:
+            clean_cand = clean_name_for_matching(thread_candidate)
+            if clean_cand in ("all", "everyone", "team"):
+                return "Team / All", True
+            elif clean_cand == first_name:
+                return user_name, True
+            else:
+                return thread_candidate, False
+
+    # 6. Direct 1-on-1 chat default
     if is_direct_chat:
         return user_name, True
 
-    # 6. If the sender is the user, task is assigned to the user
+    # 7. If the sender is the user, task is assigned to the user
     if sender_name and clean_name_for_matching(sender_name) == first_name:
         return user_name, True
 
-    # 7. In a group chat with no user mention and no team mention,
+    # 8. In a group chat with no user mention and no thread context pointing to user,
     # the task is NOT assigned to the user!
     return "Others", False
 
@@ -460,7 +533,7 @@ def extract_with_heuristics(messages: List[Dict]) -> List[Dict]:
         re.IGNORECASE
     )
 
-    for msg in messages:
+    for msg_idx, msg in enumerate(messages):
         content = msg.get("content", "").strip()
         msg_id = msg.get("id")
         sender_name = msg.get("sender_name", "")
@@ -498,7 +571,15 @@ def extract_with_heuristics(messages: List[Dict]) -> List[Dict]:
                     due_dt = resolve_due_date(sentence_clean, base_time=msg_time)
                     priority = determine_priority(sentence_clean, due_dt, base_time=msg_time, sender_name=sender_name)
                     is_group = any(w in chat_name.lower() for w in ("group", "club", "members", "unofficial", "official", "team", "202", "class", "batch", "committee", "aerospace", "btech"))
-                    assigned_to, is_for_me = detect_assignee(sentence_clean, user_name=target_user, is_direct_chat=not is_group, sender_name=sender_name)
+                    assigned_to, is_for_me = detect_assignee(
+                        sentence_clean,
+                        user_name=target_user,
+                        is_direct_chat=not is_group,
+                        sender_name=sender_name,
+                        messages=messages,
+                        current_idx=msg_idx,
+                        chat_name=chat_name
+                    )
 
                     extracted_tasks.append({
                         "task_name": task_title,
@@ -515,16 +596,36 @@ def extract_with_heuristics(messages: List[Dict]) -> List[Dict]:
 
 def extract_with_ollama(messages: List[Dict]) -> List[Dict]:
     """LLM extractor querying local Ollama instance with JSON format."""
-    valid_msgs = [
-        {
+    valid_msgs = []
+    for idx, m in enumerate(messages):
+        if not m.get("id") or is_non_actionable_message(m.get("content", "")):
+            continue
+        c_chat = m.get("chat_name", "")
+        # Look for preceding message in same chat
+        prev_ctx = None
+        for j in range(idx - 1, max(-1, idx - 4), -1):
+            if messages[j].get("chat_name") == c_chat:
+                prev_ctx = f"{messages[j].get('sender_name')}: {messages[j].get('content', '')[:90]}"
+                break
+        # Look for next message in same chat
+        next_ctx = None
+        for j in range(idx + 1, min(len(messages), idx + 3)):
+            if messages[j].get("chat_name") == c_chat:
+                next_ctx = f"{messages[j].get('sender_name')}: {messages[j].get('content', '')[:90]}"
+                break
+
+        msg_item = {
             "id": m["id"],
             "sender": m.get("sender_name", "User"),
             "timestamp": m["timestamp"].isoformat() if hasattr(m["timestamp"], "isoformat") else str(m["timestamp"]),
             "content": m["content"]
         }
-        for m in messages
-        if m.get("id") and not is_non_actionable_message(m.get("content", ""))
-    ]
+        if prev_ctx or next_ctx:
+            msg_item["thread_context"] = {
+                "previous_message": prev_ctx,
+                "next_message": next_ctx
+            }
+        valid_msgs.append(msg_item)
     if not valid_msgs:
         return []
 
@@ -539,10 +640,13 @@ Analyze the WhatsApp messages below and extract all genuine actionable tasks int
 CRITICAL ASSIGNEE RULES:
 - WhatsApp mentions use '@~Name', '@Name', or '@Phone' (e.g. '@~Tanishk', '@~Lakshyyy', '@Eshanya').
 - Directives: When a message addresses someone at the start (e.g. "@~Tanishk send...", "@Kanishk prepare...", "Eshanya, please finish..."), the task is assigned to THAT SPECIFIC PERSON (e.g. "Tanishk"), NOT to {target_user} and NOT to "Team / All".
+- Conversational thread context: When an instruction does NOT have an explicit @ tag (e.g. "Okay then send me the report ASAP!!!"), look at "thread_context":
+  * If the sender is replying to someone (e.g. Mahima replying to Lakshyyy who just said "Mam I already have the format"), assign the task to THAT CONVERSATIONAL PARTNER ("Lakshyyy"), NOT to {target_user}.
+  * If someone immediately acknowledges ("Sure mam", "Will do"), they are the assignee.
 - First-person pronouns ("me", "my", "to me", "and me", "dm me", "send me"):
-  "me" refers STRICTLY to the SENDER of the message (e.g. if Cse Shreya Goyal writes "send to Lakshyyy and me", "me" means Shreya Goyal). It NEVER means {target_user} unless the sender is {target_user}.
-- "assigned_to": Set to the exact person responsible (e.g. "Tanishk", "{target_user}", "Eshanya", or "Team / All"). Clean any leading '@~' or '@'.
-- "is_assigned_to_user": Set to true ONLY if the task is assigned to {target_user} or "Team / All". If assigned to another person (e.g. "Tanishk"), MUST BE false!
+  "me" refers STRICTLY to the SENDER of the message (e.g. if Mahima writes "send me the report", "me" means Mahima). It NEVER means {target_user} unless the sender is {target_user}.
+- "assigned_to": Set to the exact person responsible (e.g. "Lakshyyy", "Tanishk", "{target_user}", "Eshanya", or "Team / All"). Clean any leading '@~' or '@'.
+- "is_assigned_to_user": Set to true ONLY if the task is genuinely assigned to {target_user} or "Team / All". If assigned to another person (e.g. "Lakshyyy"), MUST BE false!
 
 STRICT PRIORITY RULES:
 - "High": Hard deadline within <= 48 hours (e.g. today, tonight, tomorrow), explicit urgency ("urgent", "asap", "without fail", "mandatory", "portal closes"), or direct directive from a professor/evaluator.
