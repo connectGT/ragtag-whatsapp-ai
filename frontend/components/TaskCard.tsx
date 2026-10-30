@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
-import { Clock, User, CalendarPlus, CheckCircle2, XCircle, MessageSquareCode, ExternalLink, MessageSquare } from "lucide-react";
+import { Clock, User, CalendarPlus, CheckCircle2, XCircle, MessageSquareCode, ExternalLink } from "lucide-react";
 
 export interface ContextMessage {
   id: string;

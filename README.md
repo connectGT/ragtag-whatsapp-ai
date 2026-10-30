@@ -152,9 +152,6 @@ source venv/bin/activate
 # Install Python dependencies
 pip install -r requirements.txt
 
-# (Optional) Seed the database with realistic sample chats
-python demo_seed.py
-
 # Start the Flask API server
 python app.py
 ```
@@ -307,7 +304,6 @@ MACRO PROJECT 3rd sem Team RAGTAG/
 │   ├── app.py                       # Flask REST API server (12 endpoints)
 │   ├── database.py                  # SQLAlchemy models (Contact, Message, Task)
 │   ├── decrypt_pipeline.py          # wadecrypt wrapper for msgstore.db.crypt15
-│   ├── demo_seed.py                 # Realistic sample chat seed generator
 │   ├── ingest.py                    # WhatsApp SQLite & TXT parsing engine
 │   ├── msgstore_ragtag.db           # SQLite ground-truth relational database
 │   ├── requirements.txt             # Python package dependencies

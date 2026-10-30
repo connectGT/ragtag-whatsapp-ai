@@ -1,7 +1,7 @@
 "use client";
 
 import React from "react";
-import { X, Database, ShieldCheck, ExternalLink, MessageSquare } from "lucide-react";
+import { X, Database, ShieldCheck, ExternalLink } from "lucide-react";
 import { ContextMessage } from "./TaskCard";
 
 interface ContextModalProps {

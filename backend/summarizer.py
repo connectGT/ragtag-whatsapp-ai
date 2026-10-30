@@ -17,7 +17,7 @@ import re
 import urllib.request
 import json
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 from database import SessionLocal, Message, Contact
 
 OLLAMA_URL = "http://127.0.0.1:11434/api/generate"

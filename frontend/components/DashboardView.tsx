@@ -9,7 +9,6 @@ import {
   CheckCircle2,
   Search,
   Sparkles,
-  Download,
   Loader2,
   RefreshCw,
   AlertCircle,
@@ -92,6 +91,7 @@ export const DashboardView: React.FC = () => {
         });
       }
     } catch (err) {
+      console.error(err);
       setExtractBanner({
         type: "error",
         message: "Network error triggering task extraction. Ensure backend is running at http://127.0.0.1:5000.",

@@ -233,7 +233,7 @@ def main(reset: bool = False) -> None:
     messages = fetch_messages()
 
     if not messages:
-        print("[Warning] No messages in SQLite. Ingest chats or run seed_db.py first.")
+        print("[Warning] No messages in SQLite. Ingest chats via the Sync page first.")
         return
 
     chunks = chunk_messages(messages)

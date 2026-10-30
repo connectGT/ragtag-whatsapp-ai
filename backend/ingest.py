@@ -18,7 +18,6 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
-import uuid
 import hashlib
 import zipfile
 import tempfile
@@ -27,7 +26,7 @@ from pathlib import Path
 from typing import Optional, Tuple, List, Dict
 
 # Local SQLite ORM imports
-from database import SessionLocal, init_db, Contact, Message, Task
+from database import SessionLocal, init_db, Contact, Message
 
 BACKEND_DIR = Path(__file__).parent
 BACKUP_DIR = BACKEND_DIR / "backups"

@@ -8,13 +8,11 @@ from __future__ import annotations
 import json
 import re
 import urllib.request
-import urllib.error
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
 
 from sqlalchemy import or_
-from sqlalchemy import or_
-from database import SessionLocal, Message, Task
+from database import Message, Task
 try:
     from settings_manager import load_settings
 except ImportError:

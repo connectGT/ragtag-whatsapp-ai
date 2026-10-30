@@ -14,7 +14,7 @@ from database import SessionLocal, Task, Message, Contact, DB_PATH
 from ingest import run_ingestion
 from vector_db import search_chats, CHROMA_PATH, COLLECTION_NAME
 from summarizer import generate_catchup_briefing, generate_timeline_summary
-from settings_manager import load_settings, save_settings, DEFAULT_SETTINGS
+from settings_manager import load_settings, save_settings
 
 try:
     import task_extractor

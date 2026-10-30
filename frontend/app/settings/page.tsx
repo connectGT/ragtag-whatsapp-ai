@@ -15,7 +15,6 @@ import {
   Zap,
   Server,
   Layers,
-  ArrowRight,
   Save,
 } from "lucide-react";
 
