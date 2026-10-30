@@ -5,7 +5,7 @@ from database import SessionLocal, init_db, Contact, Message, Task
 
 def run_faculty_demo():
     print("\n=======================================================")
-    print("🤖 RAGTAG LIVE DEMO: DATABASE & FRONTEND CONNECTION")
+    print(" RAGTAG LIVE DEMO: DATABASE & FRONTEND CONNECTION")
     print("=======================================================\n")
     
     print("Step 1: Listening for new messages...")
